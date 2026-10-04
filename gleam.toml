@@ -1,0 +1,15 @@
+name = "docuconf"
+version = "0.1.0"
+description = "Typed configuration contracts for Gleam apps: declare env vars and files, validate them at boot and export a CUE contract."
+# Licence pending: add `licences = ["..."]` before the first publish.
+repository = { type = "github", user = "docuconf", repo = "docuconf-gleam" }
+links = [{ title = "Specification", href = "https://docuconf.dev" }]
+gleam = ">= 1.14.0"
+internal_modules = ["docuconf/internal", "docuconf/internal/*"]
+
+[dependencies]
+gleam_stdlib = ">= 1.0.0 and < 2.0.0"
+envoy = ">= 1.0.0 and < 2.0.0"
+
+[dev_dependencies]
+gleeunit = ">= 1.0.0 and < 2.0.0"
