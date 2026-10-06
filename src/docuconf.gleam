@@ -1602,7 +1602,7 @@ pub fn env(var: Var(a), next: fn(a) -> Spec(b)) -> Spec(b) {
     let #(value, problems) = case ctx.collect_only {
       True -> #(var.zero, [])
       False ->
-        case var.read(raw) {
+        case read_var(var, raw) {
           Ok(v) -> #(v, [])
           Error(#(code, msg)) -> #(var.zero, [
             Violation(m.name, VarKind, code, shown(m, raw, msg)),
@@ -1612,6 +1612,31 @@ pub fn env(var: Var(a), next: fn(a) -> Spec(b)) -> Spec(b) {
     let #(b, metas, violations) = { next(value) }.run(ctx)
     #(b, [VarInput(m), ..metas], list.append(problems, violations))
   })
+}
+
+fn read_var(var: Var(a), raw: Option(String)) -> Result(a, Problem) {
+  case var.meta.secret, raw {
+    True, Some(value) ->
+      case injector_scheme(value) {
+        Ok(scheme) ->
+          Error(#(
+            InvalidType,
+            "holds an unresolved "
+              <> scheme
+              <> " reference; the injector that should resolve it did not run",
+          ))
+        Error(Nil) -> var.read(raw)
+      }
+    _, _ -> var.read(raw)
+  }
+}
+
+// SPEC §4.5.1 and §11.2: platforms inject secrets (Bank-Vaults vault-env,
+// `op run`, vals) before the process starts. A secret that still holds a
+// reference means the injector did not run. The message names the scheme,
+// never the value.
+fn injector_scheme(value: String) -> Result(String, Nil) {
+  list.find(["vault:", "op://", "ref+"], string.starts_with(value, _))
 }
 
 fn shown(m: VarMeta, raw: Option(String), msg: String) -> String {

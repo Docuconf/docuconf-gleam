@@ -327,6 +327,60 @@ pub fn termination_log_test() {
   let assert False = string.contains(written, "s3cr3t")
 }
 
+pub fn unresolved_injector_reference_test() {
+  let root = file_root()
+  let log = root <> "/termination-log"
+  let vault = "vault:secret/data/gateway#database_url"
+  let op = "op://prod/partner/keystore-password"
+  let opts =
+    docuconf.options()
+    |> docuconf.with_env(
+      dict.from_list(
+        list.append(base_env(), [
+          #("DATABASE_URL", vault),
+          #("KEYSTORE_PASSWORD", op),
+        ]),
+      ),
+    )
+    |> docuconf.with_file_root(root)
+    |> docuconf.with_termination_log(log)
+  let result = docuconf.load_with(sample.spec(), opts)
+  let assert Error(docuconf.InvalidConfig(vs) as e) = result
+  let assert [
+    #(
+      "DATABASE_URL",
+      "invalid_type",
+      "holds an unresolved vault: reference; the injector that should resolve it did not run",
+    ),
+    #(
+      "KEYSTORE_PASSWORD",
+      "invalid_type",
+      "holds an unresolved op:// reference; the injector that should resolve it did not run",
+    ),
+  ] =
+    list.map(vs, fn(v: docuconf.Violation) {
+      #(v.input, docuconf.code_to_string(v.code), v.message)
+    })
+  let text = docuconf.describe(e)
+  let written = support.sh("cat " <> log)
+  let assert True =
+    string.contains(
+      written,
+      "DATABASE_URL [invalid_type]: holds an unresolved vault: reference",
+    )
+  list.each([vault, op, "secret/data", "prod/partner"], fn(value) {
+    let assert False = string.contains(text, value)
+    let assert False = string.contains(written, value)
+  })
+  let assert [#("KEYSTORE_PASSWORD", "invalid_type")] =
+    codes(load(root, [#("KEYSTORE_PASSWORD", "ref+awsssm://prod/password")]))
+  // Only secrets, and only a prefix.
+  let assert [#("REGION", "pattern_mismatch")] =
+    codes(load(root, [#("REGION", "vault:eu-west-1")]))
+  let assert [#("KEYSTORE_PASSWORD", "invalid_type")] =
+    codes(load(root, [#("KEYSTORE_PASSWORD", "vault:")]))
+}
+
 // ---- declarations -----------------------------------------------------------------
 
 pub fn declaration_problems_test() {

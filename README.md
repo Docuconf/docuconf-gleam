@@ -196,6 +196,29 @@ takes `options()` with `with_env(dict)` (tests), `with_file_root`,
 `at_time(unix_seconds)` (certificate checks in tests),
 `with_termination_log(path)` and `without_termination_log`.
 
+## Injected secrets
+
+Platforms often inject secrets into the environment at runtime: Bank-Vaults'
+vault-env resolves `vault:` references, `op run` resolves `op://`, and vals
+resolves `ref+`. docuconf reads the environment as the process sees it after
+injection, so injected values are validated like any other, and it never
+resolves a reference itself (SPEC §4.5.1). If the injector did not run, a
+secret variable still holds the reference; docuconf reports that as
+`invalid_type`, naming the scheme but never the value:
+
+```
+  - DATABASE_URL [invalid_type]: holds an unresolved vault: reference; the injector that should resolve it did not run
+```
+
+## Config-file overlays
+
+There is no overlay API (SPEC §4.7). envoy reads the environment and
+nothing layers config files in a Gleam app, so there is no file stack for a
+platform-mounted overlay to sit in between the app's files and the
+environment. A declaration cannot carry `overlays`, and the exported
+contract never has any. Use a `config_file` input if the platform needs to
+supply structured configuration.
+
 ## Not covered yet
 
 Compared with the specification and the Elixir SDK:
