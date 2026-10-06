@@ -178,6 +178,17 @@ finished with `file_required` or `file_optional`. `DOCUCONF_FILE_ROOT` (or
 from a `path_env` variable. TLS checks use `:public_key` on Erlang and
 `node:crypto` on JavaScript.
 
+**Keystores** are opened with the password from `password_var` (an empty
+password when it is `None` or unset). Neither OTP nor Node.js reads PKCS#12
+or JKS, so docuconf parses the file and verifies its integrity MAC, on both
+targets: PKCS#12 with SHA-1 or SHA-2 MACs (RFC 7292 key derivation and
+HMAC, via `crypto` on Erlang and `node:crypto` on JavaScript), and the SHA-1
+integrity digest of JKS and JCEKS stores. A match proves the password is
+right and the file is intact; the keys are not decrypted. A wrong password
+or a corrupted file is `keystore_unreadable`, and so are PKCS#12 files with
+no MAC, PBMAC1 MACs (OpenSSL 3.4 `-pbmac1_pbkdf2`) and BER
+indefinite-length encodings, which are not supported.
+
 ## Loading
 
 `load(spec)` reads the process environment. `load_with(spec, options)`
@@ -189,8 +200,6 @@ takes `options()` with `with_env(dict)` (tests), `with_file_root`,
 
 Compared with the specification and the Elixir SDK:
 
-- Keystores are only checked for existence and format (PKCS#12 DER or JKS
-  magic). They are not opened with the password variable yet.
 - `reload: watch` is not offered; every file input is `restart`.
 - JSON Schemas are not generated from types (Gleam has no reflection) and
   are not checked at boot. The decoder is the boot-time check.

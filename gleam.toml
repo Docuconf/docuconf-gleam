@@ -13,3 +13,7 @@ envoy = ">= 1.0.0 and < 2.0.0"
 
 [dev_dependencies]
 gleeunit = ">= 1.0.0 and < 2.0.0"
+
+[erlang]
+# Keystore MACs use crypto, certificate checks public_key.
+extra_applications = ["crypto", "public_key"]

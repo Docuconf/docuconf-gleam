@@ -565,7 +565,168 @@ pub fn keystore_format_test() {
   let root = file_root()
   support.write(root <> "/etc/gateway/partner/keystore.p12", "garbage")
   let assert [#("partner-keystore", "keystore_unreadable")] =
-    codes(load(root, []))
+    codes(load(root, [#("KEYSTORE_PASSWORD", "changeit")]))
+}
+
+/// Exports the TLS key pair under root as a PKCS#12 file at `out`.
+fn make_p12(root: String, out: String, password: String, args: String) -> Nil {
+  let tls = root <> "/etc/gateway/tls"
+  let _ =
+    support.sh(
+      "mkdir -p \"$(dirname '"
+      <> out
+      <> "')\" && openssl pkcs12 -export -in "
+      <> tls
+      <> "/tls.crt -inkey "
+      <> tls
+      <> "/tls.key -out '"
+      <> out
+      <> "' -passout 'pass:"
+      <> password
+      <> "' "
+      <> args
+      <> " 2>&1",
+    )
+  Nil
+}
+
+fn keystore_message(result) -> String {
+  let assert Error(docuconf.InvalidConfig([v])) = result
+  let assert "keystore_unreadable" = docuconf.code_to_string(v.code)
+  v.message
+}
+
+pub fn keystore_password_test() {
+  let root = file_root()
+  let p12 = root <> "/etc/gateway/partner/keystore.p12"
+  // OpenSSL 3 defaults (SHA-256 MAC), the legacy SHA-1 MAC and SHA-512.
+  list.each(["", "-macalg sha1", "-macalg sha512 -iter 4096"], fn(args) {
+    make_p12(root, p12, "changeit", args)
+    let assert Ok(cfg) = load(root, [#("KEYSTORE_PASSWORD", "changeit")])
+    let assert Some(_) = cfg.partner_keystore
+    let msg =
+      keystore_message(load(root, [#("KEYSTORE_PASSWORD", "wrong-password")]))
+    let assert True =
+      string.contains(
+        msg,
+        "cannot open the pkcs12 keystore with the password from KEYSTORE_PASSWORD (wrong password or corrupted file: the integrity MAC does not match)",
+      )
+    let assert False = string.contains(msg, "wrong-password")
+    // Unset password variable: an empty password, which is wrong here.
+    let _ = keystore_message(load(root, []))
+  })
+  // Without a MAC the password cannot be checked.
+  make_p12(root, p12, "changeit", "-nomac")
+  let assert True =
+    string.contains(
+      keystore_message(load(root, [#("KEYSTORE_PASSWORD", "changeit")])),
+      "has no integrity MAC",
+    )
+  // A corrupted file fails the MAC even with the right password.
+  make_p12(root, p12, "changeit", "")
+  let _ =
+    support.sh(
+      "printf '\\377' | dd of='"
+      <> p12
+      <> "' bs=1 seek=200 conv=notrunc 2>/dev/null",
+    )
+  let _ = keystore_message(load(root, [#("KEYSTORE_PASSWORD", "changeit")]))
+}
+
+pub fn keystore_empty_password_test() {
+  let root = file_root()
+  let p12 = root <> "/ks/store.p12"
+  make_p12(root, p12, "", "")
+  let spec = fn(var) {
+    use ks <- docuconf.file(
+      docuconf.keystore(
+        "store",
+        "A keystore with no password",
+        path: "/ks/store.p12",
+        format: docuconf.Pkcs12,
+        password_var: var,
+      )
+      |> docuconf.file_required,
+    )
+    use _ <- docuconf.env(
+      docuconf.string("STORE_PASSWORD", "Password for the keystore")
+      |> docuconf.secret
+      |> docuconf.optional,
+    )
+    docuconf.succeed(ks)
+  }
+  let opts = fn(env) {
+    docuconf.options()
+    |> docuconf.with_env(dict.from_list(env))
+    |> docuconf.with_file_root(root)
+    |> docuconf.without_termination_log
+  }
+  let assert Ok(path) = docuconf.load_with(spec(None), opts([]))
+  let assert True = string.ends_with(path, "/ks/store.p12")
+  let assert Ok(_) = docuconf.load_with(spec(Some("STORE_PASSWORD")), opts([]))
+  let assert Error(_) =
+    docuconf.load_with(
+      spec(Some("STORE_PASSWORD")),
+      opts([#("STORE_PASSWORD", "x")]),
+    )
+}
+
+pub fn keystore_jks_test() {
+  case support.has("keytool") {
+    False -> Nil
+    True -> {
+      let root = file_root()
+      let p12 = root <> "/src.p12"
+      make_p12(root, p12, "changeit", "-name leaf")
+      let spec = fn(path) {
+        use ks <- docuconf.file(
+          docuconf.keystore(
+            "store",
+            "A Java keystore",
+            path: path,
+            format: docuconf.Jks,
+            password_var: Some("STORE_PASSWORD"),
+          )
+          |> docuconf.file_required,
+        )
+        use _ <- docuconf.env(
+          docuconf.string("STORE_PASSWORD", "Password for the keystore")
+          |> docuconf.secret
+          |> docuconf.optional,
+        )
+        docuconf.succeed(ks)
+      }
+      list.each(["JKS", "JCEKS"], fn(kind) {
+        let out = "/ks/" <> string.lowercase(kind) <> "/store.jks"
+        let _ =
+          support.sh(
+            "mkdir -p \"$(dirname '"
+            <> root
+            <> out
+            <> "')\" && keytool -importkeystore -noprompt -srckeystore "
+            <> p12
+            <> " -srcstoretype PKCS12 -srcstorepass changeit -destkeystore '"
+            <> root
+            <> out
+            <> "' -deststoretype "
+            <> kind
+            <> " -deststorepass changeit 2>&1",
+          )
+        let opts = fn(pw) {
+          docuconf.options()
+          |> docuconf.with_env(dict.from_list([#("STORE_PASSWORD", pw)]))
+          |> docuconf.with_file_root(root)
+          |> docuconf.without_termination_log
+        }
+        let assert Ok(_) = docuconf.load_with(spec(out), opts("changeit"))
+        let assert True =
+          string.contains(
+            keystore_message(docuconf.load_with(spec(out), opts("nope-nope"))),
+            "the integrity digest does not match",
+          )
+      })
+    }
+  }
 }
 
 pub fn every_violation_vars_and_files_test() {

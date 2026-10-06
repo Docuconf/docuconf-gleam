@@ -52,6 +52,7 @@ import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/order
+import gleam/result
 import gleam/string
 
 // ---- errors -----------------------------------------------------------------
@@ -1186,9 +1187,16 @@ pub fn min_certificates(
   |> file_field("minCertificates", json.Int(n))
 }
 
-/// A PKCS#12 or JKS keystore. `password_var` names a declared secret
-/// variable. At boot this SDK checks the file exists, is readable and looks
-/// like the declared format; it does not open it with the password yet.
+/// A PKCS#12 or JKS (or JCEKS) keystore. `password_var` names a declared
+/// secret variable; when it is `None` or unset, the password is empty.
+///
+/// At boot the keystore is opened with that password on both targets:
+/// neither OTP nor Node.js reads PKCS#12 or JKS, so docuconf parses the
+/// file and verifies its integrity MAC (PKCS#12 with SHA-1 or SHA-2 MACs,
+/// RFC 7292) or integrity digest (JKS, JCEKS). A match proves the password
+/// is right and the file is intact; the keys are not decrypted. PBMAC1
+/// MACs and BER indefinite-length PKCS#12 files are reported as
+/// `keystore_unreadable`.
 pub fn keystore(
   name: String,
   description: String,
@@ -1206,22 +1214,37 @@ pub fn keystore(
       "keystore",
       description,
       path,
-      fn(path, opts, _ctx) {
+      fn(path, opts, ctx: Context) {
         case read_file(path) {
           Error(why) -> Failed([unreadable(path, why)])
-          Ok(bits) ->
-            case opts.keystore_format, bits {
-              "pkcs12", <<0x30, _:bits>> -> Loaded(path)
-              "jks", <<0xFE, 0xED, 0xFE, 0xED, _:bits>> -> Loaded(path)
-              "jks", <<0xCE, 0xCE, 0xCE, 0xCE, _:bits>> -> Loaded(path)
-              f, _ ->
+          Ok(bits) -> {
+            let password = case opts.password_var {
+              Some(var) -> dict.get(ctx.env, var) |> result.unwrap("")
+              None -> ""
+            }
+            case keystore_verify(opts.keystore_format, bits, password) {
+              Ok(Nil) -> Loaded(path)
+              Error(why) -> {
+                let via = case opts.password_var {
+                  Some(var) -> " with the password from " <> var
+                  None -> ""
+                }
                 Failed([
                   #(
                     KeystoreUnreadable,
-                    path <> " is not a " <> f <> " keystore",
+                    path
+                      <> ": cannot open the "
+                      <> opts.keystore_format
+                      <> " keystore"
+                      <> via
+                      <> " ("
+                      <> why
+                      <> ")",
                   ),
                 ])
+              }
             }
+          }
         }
       },
       "",
@@ -2086,6 +2109,14 @@ fn print_error(message: String) -> Nil
 @external(erlang, "docuconf_ffi", "pem_count")
 @external(javascript, "./docuconf_ffi.mjs", "pem_count")
 fn pem_count(pem: String) -> #(Int, Int)
+
+@external(erlang, "docuconf_ffi", "keystore_verify")
+@external(javascript, "./docuconf_ffi.mjs", "keystore_verify")
+fn keystore_verify(
+  format: String,
+  content: BitArray,
+  password: String,
+) -> Result(Nil, String)
 
 @external(erlang, "docuconf_ffi", "tls_check")
 @external(javascript, "./docuconf_ffi.mjs", "tls_check")
