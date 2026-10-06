@@ -164,6 +164,9 @@ pub fn spec() -> docuconf.Spec(Sample) {
   use gomemlimit <- docuconf.env(
     docuconf.int("GOMEMLIMIT", "Soft memory limit, in bytes")
     |> docuconf.min_int(1)
+    // The largest integer the JavaScript target holds exactly, so the
+    // export is the same on both targets.
+    |> docuconf.max_int(9_007_199_254_740_991)
     |> docuconf.optional,
   )
   use sample_rate <- docuconf.env(

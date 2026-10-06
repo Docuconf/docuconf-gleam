@@ -124,7 +124,7 @@ gleam run -m orders/contract
 | Builder | Contract type | Gleam value | Constraints |
 |---|---|---|---|
 | `string` | `string` | `String` | `min_length`, `max_length`, `pattern` |
-| `int` | `int` | `Int` (64-bit range checked) | `min_int`, `max_int` |
+| `int` | `int` | `Int` (64-bit range checked; ±(2^53 − 1) on JavaScript) | `min_int`, `max_int` |
 | `float` | `float` | `Float` (NaN/Inf rejected) | `min_float`, `max_float` |
 | `bool` | `bool` | `Bool` (`true`/`false`, any case) | |
 | `duration` | `duration` (`go` encoding) | `docuconf/duration.Duration` | `min_duration`, `max_duration` |
@@ -144,6 +144,14 @@ Every builder also takes `secret`, `group`, `examples`, `config_key`,
   `^` and `$`. Features RE2 lacks (lookaround, backreferences, atomic groups,
   possessive quantifiers) are declaration errors. Matching follows RE2 on
   both targets: `$` is end of text, and `\d`, `\w`, `\s`, `\b` are ASCII-only.
+- **Integers on JavaScript** are numbers, exact only within ±(2^53 − 1).
+  On that target every `int` variable exports `min` and `max` within that
+  range (SPEC §5): `-9007199254740991` and `9007199254740991` unless
+  `min_int`/`max_int` narrow them. Wider bounds or defaults are declaration
+  errors, and a value beyond the range is `out_of_range` at boot rather
+  than silently rounded. The Erlang target accepts the whole 64-bit range,
+  so the same declaration can export different bounds per target; pin them
+  with `min_int`/`max_int` if the contract must not depend on the target.
 - **Empty strings** are present values for `string` and unset for every
   other type. Values are never trimmed.
 - **`json` and config files** decode into your own type with a
@@ -227,7 +235,9 @@ Compared with the specification and the Elixir SDK:
 - JSON Schemas are not generated from types (Gleam has no reflection) and
   are not checked at boot. The decoder is the boot-time check.
 - No `.env` loading, no contract-first mode, no profiles (SPEC §4.4).
-- On JavaScript, integers beyond 2^53 lose precision, as JavaScript numbers do.
+- `int_list` items on JavaScript: the contract has no per-item bounds, so
+  the platform may accept an item beyond ±(2^53 − 1); the boot check then
+  rejects it as `out_of_range`.
 
 ## Development
 

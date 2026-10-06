@@ -59,6 +59,11 @@ export function file_exists(path) {
   }
 }
 
+// Integers are exact only within ±(2^53 - 1) on this target.
+export function int_limits() {
+  return new Ok([Number.MIN_SAFE_INTEGER, Number.MAX_SAFE_INTEGER]);
+}
+
 export function now_unix() {
   return Math.floor(Date.now() / 1000);
 }

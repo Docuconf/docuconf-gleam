@@ -795,10 +795,130 @@ pub fn every_violation_vars_and_files_test() {
 }
 
 pub fn int64_range_test() {
-  let root = file_root()
-  let assert Ok(_) = load(root, [#("GOMEMLIMIT", "9223372036854775807")])
-  let assert [#("GOMEMLIMIT", "invalid_type")] =
-    codes(load(root, [#("GOMEMLIMIT", "9223372036854775808")]))
+  let spec = {
+    use n <- docuconf.env(
+      docuconf.int("N", "A big number") |> docuconf.required,
+    )
+    docuconf.succeed(n)
+  }
+  let load = fn(v) {
+    docuconf.load_with(
+      spec,
+      docuconf.options()
+        |> docuconf.with_env(dict.from_list([#("N", v)]))
+        |> docuconf.without_termination_log,
+    )
+  }
+  let assert [#("N", "invalid_type")] = codes(load("9223372036854775808"))
+  let assert [#("N", "invalid_type")] = codes(load("-9223372036854775809"))
+  case support.target() {
+    "erlang" -> {
+      let assert Ok(n) = load("9223372036854775807")
+      let assert "9223372036854775807" = int.to_string(n)
+      let assert Ok(n) = load("-9223372036854775808")
+      let assert "-9223372036854775808" = int.to_string(n)
+      Nil
+    }
+    _ -> Nil
+  }
+}
+
+// SPEC §5: on JavaScript an Int is exact only within ±(2^53 - 1), so the
+// export bounds every int variable to that range and the boot check rejects
+// values beyond it, instead of rounding them.
+pub fn javascript_int_range_test() {
+  let max = 9_007_199_254_740_991
+  // 2^53, built at runtime: the literal is not safe on JavaScript.
+  let two_53 = max + 1
+  let unbounded = {
+    use n <- docuconf.env(
+      docuconf.int("N", "A big number") |> docuconf.optional,
+    )
+    use ns <- docuconf.env(
+      docuconf.int_list("NS", "Big numbers", separator: ",")
+      |> docuconf.optional,
+    )
+    docuconf.succeed(#(n, ns))
+  }
+  let load = fn(spec, env) {
+    docuconf.load_with(
+      spec,
+      docuconf.options()
+        |> docuconf.with_env(dict.from_list(env))
+        |> docuconf.without_termination_log,
+    )
+  }
+  let assert Ok(cue) = docuconf.contract(unbounded, name: "ints")
+  let narrowed = {
+    use n <- docuconf.env(
+      docuconf.int("N", "A big number")
+      |> docuconf.min_int(1)
+      |> docuconf.optional,
+    )
+    docuconf.succeed(n)
+  }
+  let assert Ok(narrowed_cue) = docuconf.contract(narrowed, name: "ints")
+  let wide = {
+    use n <- docuconf.env(
+      docuconf.int("N", "A big number")
+      |> docuconf.min_int(-two_53)
+      |> docuconf.max_int(two_53)
+      |> docuconf.optional,
+    )
+    docuconf.succeed(n)
+  }
+  case support.target() {
+    "javascript" -> {
+      let assert True =
+        string.contains(
+          cue,
+          "\t\t\tmin: -9007199254740991\n\t\t\tmax: 9007199254740991\n",
+        )
+      let assert True =
+        string.contains(
+          narrowed_cue,
+          "\t\t\tmin: 1\n\t\t\tmax: 9007199254740991\n",
+        )
+      let assert Ok(#(Some(n), None)) =
+        load(unbounded, [#("N", "9007199254740991")])
+      let assert True = n == max
+      let assert Ok(#(Some(n), None)) =
+        load(unbounded, [#("N", "-9007199254740991")])
+      let assert True = n == -max
+      let assert [#("N", "out_of_range"), #("NS", "out_of_range")] =
+        codes(
+          load(unbounded, [
+            #("N", "9007199254740993"),
+            #("NS", "1,9007199254740992"),
+          ]),
+        )
+      let assert [#("N", "out_of_range")] =
+        codes(load(unbounded, [#("N", "-9007199254740992")]))
+      let assert [_, _] = docuconf.check_declaration(wide)
+      let defaulted = {
+        use n <- docuconf.env(
+          docuconf.int("N", "A big number")
+          |> docuconf.default(two_53),
+        )
+        docuconf.succeed(n)
+      }
+      let assert [_] = docuconf.check_declaration(defaulted)
+      Nil
+    }
+    _ -> {
+      let assert False = string.contains(cue, "min")
+      let assert False = string.contains(cue, "max")
+      let assert Ok(#(Some(n), Some([1, m]))) =
+        load(unbounded, [
+          #("N", "9007199254740993"),
+          #("NS", "1,9007199254740992"),
+        ])
+      let assert "9007199254740993" = int.to_string(n)
+      let assert True = m == two_53
+      let assert [] = docuconf.check_declaration(wide)
+      Nil
+    }
+  }
 }
 
 fn matches(pattern: String, value: String) -> Bool {

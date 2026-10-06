@@ -218,8 +218,41 @@ pub fn string(name: String, description: String) -> VarBuilder(String) {
 }
 
 /// A 64-bit integer, base 10.
+///
+/// On the JavaScript target an `Int` is a number, exact only within
+/// ±(2^53 − 1). There the variable always exports `min` and `max` within
+/// that range (SPEC §5), so the platform never accepts a value the app
+/// cannot hold: `-9007199254740991` and `9007199254740991` unless
+/// `min_int`/`max_int` narrow them, and wider bounds are declaration errors.
 pub fn int(name: String, description: String) -> VarBuilder(Int) {
-  builder(name, "int", description, parse_int, json.Int, 0)
+  let b = builder(name, "int", description, parse_int, json.Int, 0)
+  case int_limits() {
+    Error(Nil) -> b
+    Ok(#(lo, hi)) ->
+      b
+      |> set_field("min", json.Int(lo))
+      |> set_field("max", json.Int(hi))
+      |> add_check(fn(v) { bound(v < lo || v > hi, outside_safe_range) })
+  }
+}
+
+const outside_safe_range = "is outside ±9007199254740991, the integers the JavaScript target holds exactly"
+
+// The integer range the target holds exactly: Error(Nil) on Erlang (any
+// 64-bit integer), ±(2^53 - 1) on JavaScript.
+@external(erlang, "docuconf_ffi", "int_limits")
+@external(javascript, "./docuconf_ffi.mjs", "int_limits")
+fn int_limits() -> Result(#(Int, Int), Nil)
+
+fn within_limits(b: VarBuilder(Int), n: Int, what: String) -> VarBuilder(Int) {
+  case int_limits() {
+    Ok(#(lo, hi)) if n < lo || n > hi ->
+      add_problem(
+        b,
+        what <> " " <> int.to_string(n) <> " " <> outside_safe_range,
+      )
+    _ -> b
+  }
 }
 
 /// A finite decimal number; NaN and infinities are rejected.
@@ -530,11 +563,13 @@ pub fn pattern(b: VarBuilder(String), pattern: String) -> VarBuilder(String) {
 
 pub fn min_int(b: VarBuilder(Int), n: Int) -> VarBuilder(Int) {
   set_field(b, "min", json.Int(n))
+  |> within_limits(n, "min_int")
   |> add_check(fn(v) { bound(v < n, "below min " <> int.to_string(n)) })
 }
 
 pub fn max_int(b: VarBuilder(Int), n: Int) -> VarBuilder(Int) {
   set_field(b, "max", json.Int(n))
+  |> within_limits(n, "max_int")
   |> add_check(fn(v) { bound(v > n, "above max " <> int.to_string(n)) })
 }
 
@@ -780,7 +815,12 @@ fn parse_int(s: String) -> Result(Int, Problem) {
         False -> Error(#(InvalidType, "is outside the 64-bit integer range"))
         True -> {
           let assert Ok(n) = int.parse(string.replace(s, "+", ""))
-          Ok(n)
+          case int_limits() {
+            // Beyond 2^53 the parsed number is rounded, but still outside.
+            Ok(#(lo, hi)) if n < lo || n > hi ->
+              Error(#(OutOfRange, outside_safe_range))
+            _ -> Ok(n)
+          }
         }
       }
   }

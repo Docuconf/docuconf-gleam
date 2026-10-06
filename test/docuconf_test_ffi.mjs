@@ -8,3 +8,7 @@ export function shell(cmd) {
     return [e.status ?? -1, (e.stdout ?? "") + (e.stderr ?? "")];
   }
 }
+
+export function target() {
+  return "javascript";
+}
