@@ -12,6 +12,11 @@ pub fn shell(cmd: String) -> #(Int, String)
 @external(javascript, "./docuconf_test_ffi.mjs", "target")
 pub fn target() -> String
 
+/// Reads a UTF-8 text file.
+@external(erlang, "docuconf_test_ffi", "read_file")
+@external(javascript, "./docuconf_test_ffi.mjs", "read_file")
+pub fn read_file(path: String) -> Result(String, Nil)
+
 /// Runs a command that must succeed; returns its output.
 pub fn sh(cmd: String) -> String {
   let #(code, out) = shell(cmd)

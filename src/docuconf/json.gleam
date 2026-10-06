@@ -2,6 +2,9 @@
 //// an exported contract. A small type of its own keeps docuconf free of a
 //// JSON library dependency; objects keep their fields in the given order.
 
+import gleam/dict
+import gleam/dynamic.{type Dynamic}
+import gleam/dynamic/decode.{type Decoder}
 import gleam/float
 import gleam/int
 import gleam/list
@@ -44,6 +47,41 @@ pub fn array(items: List(a), of encode: fn(a) -> Json) -> Json {
 pub fn object(fields: List(#(String, Json))) -> Json {
   Object(fields)
 }
+
+/// Parses JSON text. Object fields are sorted by name. On the JavaScript
+/// target numbers are doubles, so integers beyond ±(2^53 − 1) are rounded.
+pub fn parse(text: String) -> Result(Json, String) {
+  case json_decode(text) {
+    Error(why) -> Error(why)
+    Ok(dyn) ->
+      case decode.run(dyn, decoder()) {
+        Ok(j) -> Ok(j)
+        Error(_) -> Error("not a JSON value")
+      }
+  }
+}
+
+/// Decodes a JSON value already turned into `Dynamic` (by `json.decode` on
+/// Erlang or `JSON.parse` on JavaScript). Object fields are sorted by name.
+pub fn decoder() -> Decoder(Json) {
+  use <- decode.recursive
+  decode.one_of(decode.map(decode.bool, Bool), [
+    decode.map(decode.int, Int),
+    decode.map(decode.float, Float),
+    decode.map(decode.string, String),
+    decode.map(decode.list(decoder()), Array),
+    decode.map(decode.dict(decode.string, decoder()), fn(d) {
+      Object(
+        dict.to_list(d) |> list.sort(fn(a, b) { string.compare(a.0, b.0) }),
+      )
+    }),
+    decode.map(decode.optional(decode.failure(Null, "null")), fn(_) { Null }),
+  ])
+}
+
+@external(erlang, "docuconf_ffi", "json_decode")
+@external(javascript, "../docuconf_ffi.mjs", "json_decode")
+fn json_decode(text: String) -> Result(Dynamic, String)
 
 /// Encodes compactly, as the `json` wire encoding expects.
 pub fn to_string(j: Json) -> String {

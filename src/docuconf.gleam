@@ -170,6 +170,8 @@ pub opaque type VarBuilder(a) {
   VarBuilder(
     meta: VarMeta,
     parse: fn(String) -> Result(a, Problem),
+    /// Parses the items of an `indexed` list (NAME__0, NAME__1, ...).
+    parse_items: Option(fn(List(String)) -> Result(a, Problem)),
     check: fn(a) -> Result(Nil, Problem),
     encode: fn(a) -> Json,
     zero: a,
@@ -178,7 +180,29 @@ pub opaque type VarBuilder(a) {
 
 /// A declared variable, ready for `env`.
 pub opaque type Var(a) {
-  Var(meta: VarMeta, read: fn(Option(String)) -> Result(a, Problem), zero: a)
+  Var(meta: VarMeta, read: fn(Option(Raw)) -> Result(a, Problem), zero: a)
+}
+
+// What the environment holds for a variable: one value, or the items of an
+// indexed list.
+type Raw {
+  Text(String)
+  Items(List(String))
+}
+
+/// Transforms a declared variable's value, for example to wrap it in a type
+/// of your own. The variable and its contract entry are unchanged.
+pub fn map(var: Var(a), with f: fn(a) -> b) -> Var(b) {
+  Var(
+    meta: var.meta,
+    read: fn(raw) {
+      case var.read(raw) {
+        Ok(v) -> Ok(f(v))
+        Error(e) -> Error(e)
+      }
+    },
+    zero: f(var.zero),
+  )
 }
 
 fn builder(
@@ -206,6 +230,7 @@ fn builder(
       problems: [],
     ),
     parse:,
+    parse_items: None,
     check: fn(_) { Ok(Nil) },
     encode:,
     zero:,
@@ -280,22 +305,62 @@ pub fn bool(name: String, description: String) -> VarBuilder(Bool) {
 
 /// A Go-syntax duration such as `1m30s` (the `go` encoding).
 pub fn duration(name: String, description: String) -> VarBuilder(Duration) {
+  duration_with(name, description, encoding: Go)
+}
+
+/// How a duration is written in the environment (SPEC §5).
+pub type DurationEncoding {
+  /// Go syntax: `1m30s`.
+  Go
+  /// ISO 8601: `PT90S`.
+  Iso8601
+  /// A decimal number of seconds: `90`, `0.25`.
+  Seconds
+  /// .NET `TimeSpan`: `00:01:30`, `1.02:03:04.5`.
+  Timespan
+}
+
+/// A duration in the given wire encoding. Bounds and defaults are still
+/// written in Go syntax, and the contract records the encoding so the
+/// platform renders values the way the app parses them.
+pub fn duration_with(
+  name: String,
+  description: String,
+  encoding encoding: DurationEncoding,
+) -> VarBuilder(Duration) {
+  let #(id, parse, hint) = case encoding {
+    Go -> #("go", duration.parse, "a Go duration such as 1m30s")
+    Iso8601 -> #(
+      "iso8601",
+      duration.parse_iso8601,
+      "an ISO 8601 duration such as PT90S",
+    )
+    Seconds -> #(
+      "seconds",
+      duration.parse_seconds,
+      "a number of seconds such as 90 or 1.5",
+    )
+    Timespan -> #(
+      "timespan",
+      duration.parse_timespan,
+      "a [d.]hh:mm:ss[.fff] duration such as 00:01:30",
+    )
+  }
   let b =
     builder(
       name,
       "duration",
       description,
       fn(s) {
-        case duration.parse(s) {
+        case parse(s) {
           Ok(d) -> Ok(d)
-          Error(Nil) ->
-            Error(#(InvalidType, "is not a Go duration such as 1m30s"))
+          Error(Nil) -> Error(#(InvalidType, "is not " <> hint))
         }
       },
       fn(d) { json.String(duration.to_string(d)) },
       duration.nanoseconds(0),
     )
-  set_field(b, "encoding", json.String("go"))
+  set_field(b, "encoding", json.String(id))
 }
 
 /// A URL with a `scheme://`.
@@ -357,7 +422,7 @@ pub fn string_list(
   description: String,
   separator separator: String,
 ) -> VarBuilder(List(String)) {
-  list_builder(name, description, separator, "string", Ok, json.String)
+  string_list_with(name, description, encoding: Csv(separator))
 }
 
 /// A list of 64-bit integers in the `csv` encoding, joined by `separator`.
@@ -370,7 +435,69 @@ pub fn int_list(
   description: String,
   separator separator: String,
 ) -> VarBuilder(List(Int)) {
-  let b = list_builder(name, description, separator, "int", parse_int, json.Int)
+  int_list_with(name, description, encoding: Csv(separator))
+}
+
+/// How a list is written in the environment (SPEC §5).
+pub type ListEncoding {
+  /// One variable, items joined by `separator`: `a,b`.
+  Csv(separator: String)
+  /// One variable holding a JSON array: `["a","b"]`.
+  JsonArray
+  /// One variable per item: `NAME__0=a`, `NAME__1=b`. The list is set when
+  /// `NAME__0` is, and runs up to the first missing index.
+  Indexed
+}
+
+/// A list of strings in the given wire encoding.
+pub fn string_list_with(
+  name: String,
+  description: String,
+  encoding encoding: ListEncoding,
+) -> VarBuilder(List(String)) {
+  list_builder(
+    name,
+    description,
+    encoding,
+    "string",
+    Ok,
+    fn(dyn) {
+      case decode.run(dyn, decode.string) {
+        Ok(s) -> Ok(s)
+        Error(_) -> Error(#(InvalidType, "is not a string"))
+      }
+    },
+    json.String,
+  )
+}
+
+/// A list of 64-bit integers in the given wire encoding; see `int_list`.
+pub fn int_list_with(
+  name: String,
+  description: String,
+  encoding encoding: ListEncoding,
+) -> VarBuilder(List(Int)) {
+  let b =
+    list_builder(
+      name,
+      description,
+      encoding,
+      "int",
+      parse_int,
+      fn(dyn) {
+        case decode.run(dyn, decode.int) {
+          Error(_) -> Error(#(InvalidType, "is not an integer"))
+          Ok(n) ->
+            case int_limits() {
+              Ok(#(lo, hi)) if n < lo || n > hi ->
+                Error(#(OutOfRange, outside_safe_range))
+              // The same range checks as the other encodings.
+              _ -> parse_int(int.to_string(n))
+            }
+        }
+      },
+      json.Int,
+    )
   case int_limits() {
     Error(Nil) -> b
     Ok(#(lo, hi)) ->
@@ -386,36 +513,66 @@ pub fn int_list(
 fn list_builder(
   name: String,
   description: String,
-  separator: String,
+  encoding: ListEncoding,
   items: String,
   parse_item: fn(String) -> Result(a, Problem),
+  json_item: fn(Dynamic) -> Result(a, Problem),
   encode_item: fn(a) -> Json,
 ) -> VarBuilder(List(a)) {
+  let parse_all = fn(items: List(b), parse: fn(b) -> Result(a, Problem)) {
+    items
+    |> list.index_map(fn(item, i) { #(item, i) })
+    |> list.try_map(fn(pair) {
+      case parse(pair.0) {
+        Ok(v) -> Ok(v)
+        Error(#(code, msg)) ->
+          Error(#(code, "item " <> int.to_string(pair.1 + 1) <> " " <> msg))
+      }
+    })
+  }
+  let parse = case encoding {
+    Csv(separator) -> fn(s) {
+      parse_all(string.split(s, separator), parse_item)
+    }
+    JsonArray -> fn(s) {
+      case json_decode(s) {
+        Error(_) -> Error(#(InvalidType, "is not a JSON array"))
+        Ok(dyn) ->
+          case decode.run(dyn, decode.list(decode.dynamic)) {
+            Error(_) -> Error(#(InvalidType, "is not a JSON array"))
+            Ok(items) -> parse_all(items, json_item)
+          }
+      }
+    }
+    Indexed -> fn(s) { parse_all([s], parse_item) }
+  }
   let b =
     builder(
       name,
       "list",
       description,
-      fn(s) {
-        string.split(s, separator)
-        |> list.index_map(fn(item, i) { #(item, i) })
-        |> list.try_map(fn(pair) {
-          case parse_item(pair.0) {
-            Ok(v) -> Ok(v)
-            Error(#(code, msg)) ->
-              Error(#(code, "item " <> int.to_string(pair.1 + 1) <> " " <> msg))
-          }
-        })
-      },
+      parse,
       fn(l) { json.array(l, encode_item) },
       [],
     )
     |> set_field("items", json.String(items))
-    |> set_field("encoding", json.String("csv"))
-    |> set_field("separator", json.String(separator))
-  case separator {
-    "" -> add_problem(b, "separator must not be empty")
-    _ -> b
+  case encoding {
+    Csv(separator) -> {
+      let b =
+        b
+        |> set_field("encoding", json.String("csv"))
+        |> set_field("separator", json.String(separator))
+      case separator {
+        "" -> add_problem(b, "separator must not be empty")
+        _ -> b
+      }
+    }
+    JsonArray -> set_field(b, "encoding", json.String("json"))
+    Indexed ->
+      VarBuilder(
+        ..set_field(b, "encoding", json.String("indexed")),
+        parse_items: Some(fn(items) { parse_all(items, parse_item) }),
+      )
   }
 }
 
@@ -772,8 +929,13 @@ pub fn deploy_time_switch(b: VarBuilder(a)) -> VarBuilder(a) {
 
 // ---- finishing variables ----------------------------------------------------
 
-fn parse_and_check(b: VarBuilder(a), raw: String) -> Result(a, Problem) {
-  case b.parse(raw) {
+fn parse_and_check(b: VarBuilder(a), raw: Raw) -> Result(a, Problem) {
+  let parsed = case raw, b.parse_items {
+    Text(s), _ -> b.parse(s)
+    Items(items), Some(parse_items) -> parse_items(items)
+    Items(_), None -> Error(#(InvalidType, "is not an indexed list"))
+  }
+  case parsed {
     Ok(v) ->
       case b.check(v) {
         Ok(Nil) -> Ok(v)
@@ -1683,11 +1845,19 @@ pub fn succeed(value: a) -> Spec(a) {
 pub fn env(var: Var(a), next: fn(a) -> Spec(b)) -> Spec(b) {
   Spec(run: fn(ctx: Context) {
     let m = var.meta
-    let raw = case dict.get(ctx.env, m.name) {
-      // SPEC §5: empty means unset for every type but string.
-      Ok("") if m.type_ != "string" -> None
-      Ok(s) -> Some(s)
-      Error(Nil) -> None
+    let raw = case list.key_find(m.fields, "encoding") {
+      Ok(json.String("indexed")) ->
+        case indexed_items(ctx.env, m.name, 0, []) {
+          [] -> None
+          items -> Some(Items(items))
+        }
+      _ ->
+        case dict.get(ctx.env, m.name) {
+          // SPEC §5: empty means unset for every type but string.
+          Ok("") if m.type_ != "string" -> None
+          Ok(s) -> Some(Text(s))
+          Error(Nil) -> None
+        }
     }
     let #(value, problems) = case ctx.collect_only {
       True -> #(var.zero, [])
@@ -1704,9 +1874,22 @@ pub fn env(var: Var(a), next: fn(a) -> Spec(b)) -> Spec(b) {
   })
 }
 
-fn read_var(var: Var(a), raw: Option(String)) -> Result(a, Problem) {
+// NAME__0, NAME__1, ... up to the first missing index.
+fn indexed_items(
+  env: Dict(String, String),
+  name: String,
+  i: Int,
+  acc: List(String),
+) -> List(String) {
+  case dict.get(env, name <> "__" <> int.to_string(i)) {
+    Ok(item) -> indexed_items(env, name, i + 1, [item, ..acc])
+    Error(Nil) -> list.reverse(acc)
+  }
+}
+
+fn read_var(var: Var(a), raw: Option(Raw)) -> Result(a, Problem) {
   case var.meta.secret, raw {
-    True, Some(value) ->
+    True, Some(Text(value)) ->
       case injector_scheme(value) {
         Ok(scheme) ->
           Error(#(
@@ -1729,9 +1912,9 @@ fn injector_scheme(value: String) -> Result(String, Nil) {
   list.find(["vault:", "op://", "ref+"], string.starts_with(value, _))
 }
 
-fn shown(m: VarMeta, raw: Option(String), msg: String) -> String {
+fn shown(m: VarMeta, raw: Option(Raw), msg: String) -> String {
   case m.secret, raw {
-    False, Some(r) -> json.quote(r) <> " " <> msg
+    False, Some(Text(r)) -> json.quote(r) <> " " <> msg
     _, _ -> msg
   }
 }

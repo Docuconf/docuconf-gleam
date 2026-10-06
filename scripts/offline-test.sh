@@ -27,6 +27,7 @@ for dep in envoy gleeunit; do
   sed -i "s|^gleam_stdlib = .*|gleam_stdlib = { path = \"$VENDOR/stdlib\" }|" "$VENDOR/$dep/gleam.toml"
 done
 export DOCUCONF_SPEC_CUE="${DOCUCONF_SPEC_CUE:-$here/../docuconf-go/spec/cue}"
+export DOCUCONF_CONFORMANCE="${DOCUCONF_CONFORMANCE:-$here/../docuconf-go/conformance/cases.json}"
 cd "$work"
 status=0
 gleam build --warnings-as-errors "$@"
