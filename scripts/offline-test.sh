@@ -29,6 +29,7 @@ done
 export DOCUCONF_SPEC_CUE="${DOCUCONF_SPEC_CUE:-$here/../docuconf-go/spec/cue}"
 cd "$work"
 status=0
+gleam build --warnings-as-errors "$@"
 gleam test "$@" || status=$?
 # Golden files written with UPDATE_GOLDEN=1 are copied back.
 if [ "${UPDATE_GOLDEN:-}" = "1" ]; then cp -r "$work/test/golden/." "$here/test/golden/"; fi

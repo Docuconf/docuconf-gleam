@@ -52,6 +52,7 @@ import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/order
+import gleam/result
 import gleam/string
 
 // ---- errors -----------------------------------------------------------------
@@ -217,8 +218,41 @@ pub fn string(name: String, description: String) -> VarBuilder(String) {
 }
 
 /// A 64-bit integer, base 10.
+///
+/// On the JavaScript target an `Int` is a number, exact only within
+/// ±(2^53 − 1). There the variable always exports `min` and `max` within
+/// that range (SPEC §5), so the platform never accepts a value the app
+/// cannot hold: `-9007199254740991` and `9007199254740991` unless
+/// `min_int`/`max_int` narrow them, and wider bounds are declaration errors.
 pub fn int(name: String, description: String) -> VarBuilder(Int) {
-  builder(name, "int", description, parse_int, json.Int, 0)
+  let b = builder(name, "int", description, parse_int, json.Int, 0)
+  case int_limits() {
+    Error(Nil) -> b
+    Ok(#(lo, hi)) ->
+      b
+      |> set_field("min", json.Int(lo))
+      |> set_field("max", json.Int(hi))
+      |> add_check(fn(v) { bound(v < lo || v > hi, outside_safe_range) })
+  }
+}
+
+const outside_safe_range = "is outside ±9007199254740991, the integers the JavaScript target holds exactly"
+
+// The integer range the target holds exactly: Error(Nil) on Erlang (any
+// 64-bit integer), ±(2^53 - 1) on JavaScript.
+@external(erlang, "docuconf_ffi", "int_limits")
+@external(javascript, "./docuconf_ffi.mjs", "int_limits")
+fn int_limits() -> Result(#(Int, Int), Nil)
+
+fn within_limits(b: VarBuilder(Int), n: Int, what: String) -> VarBuilder(Int) {
+  case int_limits() {
+    Ok(#(lo, hi)) if n < lo || n > hi ->
+      add_problem(
+        b,
+        what <> " " <> int.to_string(n) <> " " <> outside_safe_range,
+      )
+    _ -> b
+  }
 }
 
 /// A finite decimal number; NaN and infinities are rejected.
@@ -529,11 +563,13 @@ pub fn pattern(b: VarBuilder(String), pattern: String) -> VarBuilder(String) {
 
 pub fn min_int(b: VarBuilder(Int), n: Int) -> VarBuilder(Int) {
   set_field(b, "min", json.Int(n))
+  |> within_limits(n, "min_int")
   |> add_check(fn(v) { bound(v < n, "below min " <> int.to_string(n)) })
 }
 
 pub fn max_int(b: VarBuilder(Int), n: Int) -> VarBuilder(Int) {
   set_field(b, "max", json.Int(n))
+  |> within_limits(n, "max_int")
   |> add_check(fn(v) { bound(v > n, "above max " <> int.to_string(n)) })
 }
 
@@ -779,7 +815,12 @@ fn parse_int(s: String) -> Result(Int, Problem) {
         False -> Error(#(InvalidType, "is outside the 64-bit integer range"))
         True -> {
           let assert Ok(n) = int.parse(string.replace(s, "+", ""))
-          Ok(n)
+          case int_limits() {
+            // Beyond 2^53 the parsed number is rounded, but still outside.
+            Ok(#(lo, hi)) if n < lo || n > hi ->
+              Error(#(OutOfRange, outside_safe_range))
+            _ -> Ok(n)
+          }
         }
       }
   }
@@ -1186,9 +1227,16 @@ pub fn min_certificates(
   |> file_field("minCertificates", json.Int(n))
 }
 
-/// A PKCS#12 or JKS keystore. `password_var` names a declared secret
-/// variable. At boot this SDK checks the file exists, is readable and looks
-/// like the declared format; it does not open it with the password yet.
+/// A PKCS#12 or JKS (or JCEKS) keystore. `password_var` names a declared
+/// secret variable; when it is `None` or unset, the password is empty.
+///
+/// At boot the keystore is opened with that password on both targets:
+/// neither OTP nor Node.js reads PKCS#12 or JKS, so docuconf parses the
+/// file and verifies its integrity MAC (PKCS#12 with SHA-1 or SHA-2 MACs,
+/// RFC 7292) or integrity digest (JKS, JCEKS). A match proves the password
+/// is right and the file is intact; the keys are not decrypted. PBMAC1
+/// MACs and BER indefinite-length PKCS#12 files are reported as
+/// `keystore_unreadable`.
 pub fn keystore(
   name: String,
   description: String,
@@ -1206,22 +1254,37 @@ pub fn keystore(
       "keystore",
       description,
       path,
-      fn(path, opts, _ctx) {
+      fn(path, opts, ctx: Context) {
         case read_file(path) {
           Error(why) -> Failed([unreadable(path, why)])
-          Ok(bits) ->
-            case opts.keystore_format, bits {
-              "pkcs12", <<0x30, _:bits>> -> Loaded(path)
-              "jks", <<0xFE, 0xED, 0xFE, 0xED, _:bits>> -> Loaded(path)
-              "jks", <<0xCE, 0xCE, 0xCE, 0xCE, _:bits>> -> Loaded(path)
-              f, _ ->
+          Ok(bits) -> {
+            let password = case opts.password_var {
+              Some(var) -> dict.get(ctx.env, var) |> result.unwrap("")
+              None -> ""
+            }
+            case keystore_verify(opts.keystore_format, bits, password) {
+              Ok(Nil) -> Loaded(path)
+              Error(why) -> {
+                let via = case opts.password_var {
+                  Some(var) -> " with the password from " <> var
+                  None -> ""
+                }
                 Failed([
                   #(
                     KeystoreUnreadable,
-                    path <> " is not a " <> f <> " keystore",
+                    path
+                      <> ": cannot open the "
+                      <> opts.keystore_format
+                      <> " keystore"
+                      <> via
+                      <> " ("
+                      <> why
+                      <> ")",
                   ),
                 ])
+              }
             }
+          }
         }
       },
       "",
@@ -1579,7 +1642,7 @@ pub fn env(var: Var(a), next: fn(a) -> Spec(b)) -> Spec(b) {
     let #(value, problems) = case ctx.collect_only {
       True -> #(var.zero, [])
       False ->
-        case var.read(raw) {
+        case read_var(var, raw) {
           Ok(v) -> #(v, [])
           Error(#(code, msg)) -> #(var.zero, [
             Violation(m.name, VarKind, code, shown(m, raw, msg)),
@@ -1589,6 +1652,31 @@ pub fn env(var: Var(a), next: fn(a) -> Spec(b)) -> Spec(b) {
     let #(b, metas, violations) = { next(value) }.run(ctx)
     #(b, [VarInput(m), ..metas], list.append(problems, violations))
   })
+}
+
+fn read_var(var: Var(a), raw: Option(String)) -> Result(a, Problem) {
+  case var.meta.secret, raw {
+    True, Some(value) ->
+      case injector_scheme(value) {
+        Ok(scheme) ->
+          Error(#(
+            InvalidType,
+            "holds an unresolved "
+              <> scheme
+              <> " reference; the injector that should resolve it did not run",
+          ))
+        Error(Nil) -> var.read(raw)
+      }
+    _, _ -> var.read(raw)
+  }
+}
+
+// SPEC §4.5.1 and §11.2: platforms inject secrets (Bank-Vaults vault-env,
+// `op run`, vals) before the process starts. A secret that still holds a
+// reference means the injector did not run. The message names the scheme,
+// never the value.
+fn injector_scheme(value: String) -> Result(String, Nil) {
+  list.find(["vault:", "op://", "ref+"], string.starts_with(value, _))
 }
 
 fn shown(m: VarMeta, raw: Option(String), msg: String) -> String {
@@ -2086,6 +2174,14 @@ fn print_error(message: String) -> Nil
 @external(erlang, "docuconf_ffi", "pem_count")
 @external(javascript, "./docuconf_ffi.mjs", "pem_count")
 fn pem_count(pem: String) -> #(Int, Int)
+
+@external(erlang, "docuconf_ffi", "keystore_verify")
+@external(javascript, "./docuconf_ffi.mjs", "keystore_verify")
+fn keystore_verify(
+  format: String,
+  content: BitArray,
+  password: String,
+) -> Result(Nil, String)
 
 @external(erlang, "docuconf_ffi", "tls_check")
 @external(javascript, "./docuconf_ffi.mjs", "tls_check")

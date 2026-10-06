@@ -327,6 +327,60 @@ pub fn termination_log_test() {
   let assert False = string.contains(written, "s3cr3t")
 }
 
+pub fn unresolved_injector_reference_test() {
+  let root = file_root()
+  let log = root <> "/termination-log"
+  let vault = "vault:secret/data/gateway#database_url"
+  let op = "op://prod/partner/keystore-password"
+  let opts =
+    docuconf.options()
+    |> docuconf.with_env(
+      dict.from_list(
+        list.append(base_env(), [
+          #("DATABASE_URL", vault),
+          #("KEYSTORE_PASSWORD", op),
+        ]),
+      ),
+    )
+    |> docuconf.with_file_root(root)
+    |> docuconf.with_termination_log(log)
+  let result = docuconf.load_with(sample.spec(), opts)
+  let assert Error(docuconf.InvalidConfig(vs) as e) = result
+  let assert [
+    #(
+      "DATABASE_URL",
+      "invalid_type",
+      "holds an unresolved vault: reference; the injector that should resolve it did not run",
+    ),
+    #(
+      "KEYSTORE_PASSWORD",
+      "invalid_type",
+      "holds an unresolved op:// reference; the injector that should resolve it did not run",
+    ),
+  ] =
+    list.map(vs, fn(v: docuconf.Violation) {
+      #(v.input, docuconf.code_to_string(v.code), v.message)
+    })
+  let text = docuconf.describe(e)
+  let written = support.sh("cat " <> log)
+  let assert True =
+    string.contains(
+      written,
+      "DATABASE_URL [invalid_type]: holds an unresolved vault: reference",
+    )
+  list.each([vault, op, "secret/data", "prod/partner"], fn(value) {
+    let assert False = string.contains(text, value)
+    let assert False = string.contains(written, value)
+  })
+  let assert [#("KEYSTORE_PASSWORD", "invalid_type")] =
+    codes(load(root, [#("KEYSTORE_PASSWORD", "ref+awsssm://prod/password")]))
+  // Only secrets, and only a prefix.
+  let assert [#("REGION", "pattern_mismatch")] =
+    codes(load(root, [#("REGION", "vault:eu-west-1")]))
+  let assert [#("KEYSTORE_PASSWORD", "invalid_type")] =
+    codes(load(root, [#("KEYSTORE_PASSWORD", "vault:")]))
+}
+
 // ---- declarations -----------------------------------------------------------------
 
 pub fn declaration_problems_test() {
@@ -565,7 +619,168 @@ pub fn keystore_format_test() {
   let root = file_root()
   support.write(root <> "/etc/gateway/partner/keystore.p12", "garbage")
   let assert [#("partner-keystore", "keystore_unreadable")] =
-    codes(load(root, []))
+    codes(load(root, [#("KEYSTORE_PASSWORD", "changeit")]))
+}
+
+/// Exports the TLS key pair under root as a PKCS#12 file at `out`.
+fn make_p12(root: String, out: String, password: String, args: String) -> Nil {
+  let tls = root <> "/etc/gateway/tls"
+  let _ =
+    support.sh(
+      "mkdir -p \"$(dirname '"
+      <> out
+      <> "')\" && openssl pkcs12 -export -in "
+      <> tls
+      <> "/tls.crt -inkey "
+      <> tls
+      <> "/tls.key -out '"
+      <> out
+      <> "' -passout 'pass:"
+      <> password
+      <> "' "
+      <> args
+      <> " 2>&1",
+    )
+  Nil
+}
+
+fn keystore_message(result) -> String {
+  let assert Error(docuconf.InvalidConfig([v])) = result
+  let assert "keystore_unreadable" = docuconf.code_to_string(v.code)
+  v.message
+}
+
+pub fn keystore_password_test() {
+  let root = file_root()
+  let p12 = root <> "/etc/gateway/partner/keystore.p12"
+  // OpenSSL 3 defaults (SHA-256 MAC), the legacy SHA-1 MAC and SHA-512.
+  list.each(["", "-macalg sha1", "-macalg sha512 -iter 4096"], fn(args) {
+    make_p12(root, p12, "changeit", args)
+    let assert Ok(cfg) = load(root, [#("KEYSTORE_PASSWORD", "changeit")])
+    let assert Some(_) = cfg.partner_keystore
+    let msg =
+      keystore_message(load(root, [#("KEYSTORE_PASSWORD", "wrong-password")]))
+    let assert True =
+      string.contains(
+        msg,
+        "cannot open the pkcs12 keystore with the password from KEYSTORE_PASSWORD (wrong password or corrupted file: the integrity MAC does not match)",
+      )
+    let assert False = string.contains(msg, "wrong-password")
+    // Unset password variable: an empty password, which is wrong here.
+    let _ = keystore_message(load(root, []))
+  })
+  // Without a MAC the password cannot be checked.
+  make_p12(root, p12, "changeit", "-nomac")
+  let assert True =
+    string.contains(
+      keystore_message(load(root, [#("KEYSTORE_PASSWORD", "changeit")])),
+      "has no integrity MAC",
+    )
+  // A corrupted file fails the MAC even with the right password.
+  make_p12(root, p12, "changeit", "")
+  let _ =
+    support.sh(
+      "printf '\\377' | dd of='"
+      <> p12
+      <> "' bs=1 seek=200 conv=notrunc 2>/dev/null",
+    )
+  let _ = keystore_message(load(root, [#("KEYSTORE_PASSWORD", "changeit")]))
+}
+
+pub fn keystore_empty_password_test() {
+  let root = file_root()
+  let p12 = root <> "/ks/store.p12"
+  make_p12(root, p12, "", "")
+  let spec = fn(var) {
+    use ks <- docuconf.file(
+      docuconf.keystore(
+        "store",
+        "A keystore with no password",
+        path: "/ks/store.p12",
+        format: docuconf.Pkcs12,
+        password_var: var,
+      )
+      |> docuconf.file_required,
+    )
+    use _ <- docuconf.env(
+      docuconf.string("STORE_PASSWORD", "Password for the keystore")
+      |> docuconf.secret
+      |> docuconf.optional,
+    )
+    docuconf.succeed(ks)
+  }
+  let opts = fn(env) {
+    docuconf.options()
+    |> docuconf.with_env(dict.from_list(env))
+    |> docuconf.with_file_root(root)
+    |> docuconf.without_termination_log
+  }
+  let assert Ok(path) = docuconf.load_with(spec(None), opts([]))
+  let assert True = string.ends_with(path, "/ks/store.p12")
+  let assert Ok(_) = docuconf.load_with(spec(Some("STORE_PASSWORD")), opts([]))
+  let assert Error(_) =
+    docuconf.load_with(
+      spec(Some("STORE_PASSWORD")),
+      opts([#("STORE_PASSWORD", "x")]),
+    )
+}
+
+pub fn keystore_jks_test() {
+  case support.has("keytool") {
+    False -> Nil
+    True -> {
+      let root = file_root()
+      let p12 = root <> "/src.p12"
+      make_p12(root, p12, "changeit", "-name leaf")
+      let spec = fn(path) {
+        use ks <- docuconf.file(
+          docuconf.keystore(
+            "store",
+            "A Java keystore",
+            path: path,
+            format: docuconf.Jks,
+            password_var: Some("STORE_PASSWORD"),
+          )
+          |> docuconf.file_required,
+        )
+        use _ <- docuconf.env(
+          docuconf.string("STORE_PASSWORD", "Password for the keystore")
+          |> docuconf.secret
+          |> docuconf.optional,
+        )
+        docuconf.succeed(ks)
+      }
+      list.each(["JKS", "JCEKS"], fn(kind) {
+        let out = "/ks/" <> string.lowercase(kind) <> "/store.jks"
+        let _ =
+          support.sh(
+            "mkdir -p \"$(dirname '"
+            <> root
+            <> out
+            <> "')\" && keytool -importkeystore -noprompt -srckeystore "
+            <> p12
+            <> " -srcstoretype PKCS12 -srcstorepass changeit -destkeystore '"
+            <> root
+            <> out
+            <> "' -deststoretype "
+            <> kind
+            <> " -deststorepass changeit 2>&1",
+          )
+        let opts = fn(pw) {
+          docuconf.options()
+          |> docuconf.with_env(dict.from_list([#("STORE_PASSWORD", pw)]))
+          |> docuconf.with_file_root(root)
+          |> docuconf.without_termination_log
+        }
+        let assert Ok(_) = docuconf.load_with(spec(out), opts("changeit"))
+        let assert True =
+          string.contains(
+            keystore_message(docuconf.load_with(spec(out), opts("nope-nope"))),
+            "the integrity digest does not match",
+          )
+      })
+    }
+  }
 }
 
 pub fn every_violation_vars_and_files_test() {
@@ -580,10 +795,130 @@ pub fn every_violation_vars_and_files_test() {
 }
 
 pub fn int64_range_test() {
-  let root = file_root()
-  let assert Ok(_) = load(root, [#("GOMEMLIMIT", "9223372036854775807")])
-  let assert [#("GOMEMLIMIT", "invalid_type")] =
-    codes(load(root, [#("GOMEMLIMIT", "9223372036854775808")]))
+  let spec = {
+    use n <- docuconf.env(
+      docuconf.int("N", "A big number") |> docuconf.required,
+    )
+    docuconf.succeed(n)
+  }
+  let load = fn(v) {
+    docuconf.load_with(
+      spec,
+      docuconf.options()
+        |> docuconf.with_env(dict.from_list([#("N", v)]))
+        |> docuconf.without_termination_log,
+    )
+  }
+  let assert [#("N", "invalid_type")] = codes(load("9223372036854775808"))
+  let assert [#("N", "invalid_type")] = codes(load("-9223372036854775809"))
+  case support.target() {
+    "erlang" -> {
+      let assert Ok(n) = load("9223372036854775807")
+      let assert "9223372036854775807" = int.to_string(n)
+      let assert Ok(n) = load("-9223372036854775808")
+      let assert "-9223372036854775808" = int.to_string(n)
+      Nil
+    }
+    _ -> Nil
+  }
+}
+
+// SPEC §5: on JavaScript an Int is exact only within ±(2^53 - 1), so the
+// export bounds every int variable to that range and the boot check rejects
+// values beyond it, instead of rounding them.
+pub fn javascript_int_range_test() {
+  let max = 9_007_199_254_740_991
+  // 2^53, built at runtime: the literal is not safe on JavaScript.
+  let two_53 = max + 1
+  let unbounded = {
+    use n <- docuconf.env(
+      docuconf.int("N", "A big number") |> docuconf.optional,
+    )
+    use ns <- docuconf.env(
+      docuconf.int_list("NS", "Big numbers", separator: ",")
+      |> docuconf.optional,
+    )
+    docuconf.succeed(#(n, ns))
+  }
+  let load = fn(spec, env) {
+    docuconf.load_with(
+      spec,
+      docuconf.options()
+        |> docuconf.with_env(dict.from_list(env))
+        |> docuconf.without_termination_log,
+    )
+  }
+  let assert Ok(cue) = docuconf.contract(unbounded, name: "ints")
+  let narrowed = {
+    use n <- docuconf.env(
+      docuconf.int("N", "A big number")
+      |> docuconf.min_int(1)
+      |> docuconf.optional,
+    )
+    docuconf.succeed(n)
+  }
+  let assert Ok(narrowed_cue) = docuconf.contract(narrowed, name: "ints")
+  let wide = {
+    use n <- docuconf.env(
+      docuconf.int("N", "A big number")
+      |> docuconf.min_int(-two_53)
+      |> docuconf.max_int(two_53)
+      |> docuconf.optional,
+    )
+    docuconf.succeed(n)
+  }
+  case support.target() {
+    "javascript" -> {
+      let assert True =
+        string.contains(
+          cue,
+          "\t\t\tmin: -9007199254740991\n\t\t\tmax: 9007199254740991\n",
+        )
+      let assert True =
+        string.contains(
+          narrowed_cue,
+          "\t\t\tmin: 1\n\t\t\tmax: 9007199254740991\n",
+        )
+      let assert Ok(#(Some(n), None)) =
+        load(unbounded, [#("N", "9007199254740991")])
+      let assert True = n == max
+      let assert Ok(#(Some(n), None)) =
+        load(unbounded, [#("N", "-9007199254740991")])
+      let assert True = n == -max
+      let assert [#("N", "out_of_range"), #("NS", "out_of_range")] =
+        codes(
+          load(unbounded, [
+            #("N", "9007199254740993"),
+            #("NS", "1,9007199254740992"),
+          ]),
+        )
+      let assert [#("N", "out_of_range")] =
+        codes(load(unbounded, [#("N", "-9007199254740992")]))
+      let assert [_, _] = docuconf.check_declaration(wide)
+      let defaulted = {
+        use n <- docuconf.env(
+          docuconf.int("N", "A big number")
+          |> docuconf.default(two_53),
+        )
+        docuconf.succeed(n)
+      }
+      let assert [_] = docuconf.check_declaration(defaulted)
+      Nil
+    }
+    _ -> {
+      let assert False = string.contains(cue, "min")
+      let assert False = string.contains(cue, "max")
+      let assert Ok(#(Some(n), Some([1, m]))) =
+        load(unbounded, [
+          #("N", "9007199254740993"),
+          #("NS", "1,9007199254740992"),
+        ])
+      let assert "9007199254740993" = int.to_string(n)
+      let assert True = m == two_53
+      let assert [] = docuconf.check_declaration(wide)
+      Nil
+    }
+  }
 }
 
 fn matches(pattern: String, value: String) -> Bool {

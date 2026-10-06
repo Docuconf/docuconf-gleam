@@ -1,5 +1,7 @@
 -module(docuconf_test_ffi).
--export([shell/1]).
+-export([shell/1, target/0]).
+
+target() -> <<"erlang">>.
 
 %% Runs a shell command; returns {ExitStatus, Output}.
 shell(Cmd) ->

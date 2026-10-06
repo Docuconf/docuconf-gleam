@@ -7,6 +7,11 @@ import gleam/string
 @external(javascript, "./docuconf_test_ffi.mjs", "shell")
 pub fn shell(cmd: String) -> #(Int, String)
 
+/// "erlang" or "javascript".
+@external(erlang, "docuconf_test_ffi", "target")
+@external(javascript, "./docuconf_test_ffi.mjs", "target")
+pub fn target() -> String
+
 /// Runs a command that must succeed; returns its output.
 pub fn sh(cmd: String) -> String {
   let #(code, out) = shell(cmd)

@@ -41,6 +41,7 @@ contract.#Contract & {
 			type: "int"
 			description: "Soft memory limit, in bytes"
 			min: 1
+			max: 9007199254740991
 		}
 		KEYSTORE_PASSWORD: {
 			type: "string"

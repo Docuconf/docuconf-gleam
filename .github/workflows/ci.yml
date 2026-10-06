@@ -45,6 +45,7 @@ jobs:
 
       - run: gleam deps download
       - run: gleam format --check src test
+      - run: gleam build --warnings-as-errors --target ${{ matrix.target }}
       - run: gleam test --target ${{ matrix.target }}
         env:
           DOCUCONF_SPEC_CUE: ${{ github.workspace }}/docuconf-go/spec/cue

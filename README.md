@@ -124,7 +124,7 @@ gleam run -m orders/contract
 | Builder | Contract type | Gleam value | Constraints |
 |---|---|---|---|
 | `string` | `string` | `String` | `min_length`, `max_length`, `pattern` |
-| `int` | `int` | `Int` (64-bit range checked) | `min_int`, `max_int` |
+| `int` | `int` | `Int` (64-bit range checked; ±(2^53 − 1) on JavaScript) | `min_int`, `max_int` |
 | `float` | `float` | `Float` (NaN/Inf rejected) | `min_float`, `max_float` |
 | `bool` | `bool` | `Bool` (`true`/`false`, any case) | |
 | `duration` | `duration` (`go` encoding) | `docuconf/duration.Duration` | `min_duration`, `max_duration` |
@@ -144,6 +144,14 @@ Every builder also takes `secret`, `group`, `examples`, `config_key`,
   `^` and `$`. Features RE2 lacks (lookaround, backreferences, atomic groups,
   possessive quantifiers) are declaration errors. Matching follows RE2 on
   both targets: `$` is end of text, and `\d`, `\w`, `\s`, `\b` are ASCII-only.
+- **Integers on JavaScript** are numbers, exact only within ±(2^53 − 1).
+  On that target every `int` variable exports `min` and `max` within that
+  range (SPEC §5): `-9007199254740991` and `9007199254740991` unless
+  `min_int`/`max_int` narrow them. Wider bounds or defaults are declaration
+  errors, and a value beyond the range is `out_of_range` at boot rather
+  than silently rounded. The Erlang target accepts the whole 64-bit range,
+  so the same declaration can export different bounds per target; pin them
+  with `min_int`/`max_int` if the contract must not depend on the target.
 - **Empty strings** are present values for `string` and unset for every
   other type. Values are never trimmed.
 - **`json` and config files** decode into your own type with a
@@ -178,6 +186,17 @@ finished with `file_required` or `file_optional`. `DOCUCONF_FILE_ROOT` (or
 from a `path_env` variable. TLS checks use `:public_key` on Erlang and
 `node:crypto` on JavaScript.
 
+**Keystores** are opened with the password from `password_var` (an empty
+password when it is `None` or unset). Neither OTP nor Node.js reads PKCS#12
+or JKS, so docuconf parses the file and verifies its integrity MAC, on both
+targets: PKCS#12 with SHA-1 or SHA-2 MACs (RFC 7292 key derivation and
+HMAC, via `crypto` on Erlang and `node:crypto` on JavaScript), and the SHA-1
+integrity digest of JKS and JCEKS stores. A match proves the password is
+right and the file is intact; the keys are not decrypted. A wrong password
+or a corrupted file is `keystore_unreadable`, and so are PKCS#12 files with
+no MAC, PBMAC1 MACs (OpenSSL 3.4 `-pbmac1_pbkdf2`) and BER
+indefinite-length encodings, which are not supported.
+
 ## Loading
 
 `load(spec)` reads the process environment. `load_with(spec, options)`
@@ -185,17 +204,40 @@ takes `options()` with `with_env(dict)` (tests), `with_file_root`,
 `at_time(unix_seconds)` (certificate checks in tests),
 `with_termination_log(path)` and `without_termination_log`.
 
+## Injected secrets
+
+Platforms often inject secrets into the environment at runtime: Bank-Vaults'
+vault-env resolves `vault:` references, `op run` resolves `op://`, and vals
+resolves `ref+`. docuconf reads the environment as the process sees it after
+injection, so injected values are validated like any other, and it never
+resolves a reference itself (SPEC §4.5.1). If the injector did not run, a
+secret variable still holds the reference; docuconf reports that as
+`invalid_type`, naming the scheme but never the value:
+
+```
+  - DATABASE_URL [invalid_type]: holds an unresolved vault: reference; the injector that should resolve it did not run
+```
+
+## Config-file overlays
+
+There is no overlay API (SPEC §4.7). envoy reads the environment and
+nothing layers config files in a Gleam app, so there is no file stack for a
+platform-mounted overlay to sit in between the app's files and the
+environment. A declaration cannot carry `overlays`, and the exported
+contract never has any. Use a `config_file` input if the platform needs to
+supply structured configuration.
+
 ## Not covered yet
 
 Compared with the specification and the Elixir SDK:
 
-- Keystores are only checked for existence and format (PKCS#12 DER or JKS
-  magic). They are not opened with the password variable yet.
 - `reload: watch` is not offered; every file input is `restart`.
 - JSON Schemas are not generated from types (Gleam has no reflection) and
   are not checked at boot. The decoder is the boot-time check.
 - No `.env` loading, no contract-first mode, no profiles (SPEC §4.4).
-- On JavaScript, integers beyond 2^53 lose precision, as JavaScript numbers do.
+- `int_list` items on JavaScript: the contract has no per-item bounds, so
+  the platform may accept an item beyond ±(2^53 − 1); the boot check then
+  rejects it as `out_of_range`.
 
 ## Development
 
