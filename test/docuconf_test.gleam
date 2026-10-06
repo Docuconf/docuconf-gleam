@@ -149,6 +149,12 @@ pub fn export_options_test() {
 /// else a sibling checkout). Skipped when cue or the spec is absent, unless
 /// DOCUCONF_REQUIRE_VET=1.
 pub fn export_cue_vet_test() {
+  let assert Ok(contract) =
+    docuconf.contract(sample.spec(), name: "sample-gateway")
+  cue_vet(contract)
+}
+
+fn cue_vet(contract: String) -> Nil {
   let spec_dir = case envoy.get("DOCUCONF_SPEC_CUE") {
     Ok(d) -> d
     Error(Nil) -> "../docuconf-go/spec/cue"
@@ -164,8 +170,6 @@ pub fn export_cue_vet_test() {
   let spec_ok = support.shell("test -d '" <> spec_dir <> "/contract'").0 == 0
   case cue_bin, spec_ok {
     Some(cue), True -> {
-      let assert Ok(contract) =
-        docuconf.contract(sample.spec(), name: "sample-gateway")
       let dir = support.temp_dir()
       let _ =
         support.sh(
@@ -182,7 +186,7 @@ pub fn export_cue_vet_test() {
         support.shell("cd " <> dir <> " && " <> cue <> " vet -c ./svc 2>&1")
       case code {
         0 -> Nil
-        _ -> panic as { "cue vet failed:\n" <> out }
+        _ -> panic as { "cue vet failed:\n" <> out <> "\n" <> contract }
       }
     }
     _, _ ->
@@ -277,6 +281,53 @@ pub fn all_violations_together_test() {
     string.contains(text, "docuconf: 12 configuration problems:")
   let assert True =
     string.contains(text, "PORT [out_of_range]: \"70000\" is above max 65535")
+}
+
+// SPEC §4.3, §5: itemMin and itemMax bound each item of an int list.
+pub fn item_bounds_test() {
+  let spec = {
+    use shards <- docuconf.env(
+      docuconf.int_list(
+        "SHARDS",
+        "Shard ids this instance owns",
+        separator: ",",
+      )
+      |> docuconf.item_min(0)
+      |> docuconf.item_max(1023)
+      |> docuconf.optional,
+    )
+    docuconf.succeed(shards)
+  }
+  let load = fn(v) {
+    docuconf.load_with(
+      spec,
+      docuconf.options()
+        |> docuconf.with_env(dict.from_list([#("SHARDS", v)]))
+        |> docuconf.without_termination_log,
+    )
+  }
+  let assert Ok(Some([0, 7, 1023])) = load("0,7,1023")
+  let assert [#("SHARDS", "out_of_range")] = codes(load("3,-1"))
+  let assert [#("SHARDS", "out_of_range")] = codes(load("1024"))
+  let assert [#("SHARDS", "invalid_type")] = codes(load("1,x"))
+  let assert Ok(cue) = docuconf.contract(spec, name: "shards")
+  let assert True =
+    string.contains(cue, "\t\t\titemMin: 0\n\t\t\titemMax: 1023\n")
+  cue_vet(cue)
+  // A default must respect the bounds.
+  let bad_default = {
+    use shards <- docuconf.env(
+      docuconf.int_list(
+        "SHARDS",
+        "Shard ids this instance owns",
+        separator: ",",
+      )
+      |> docuconf.item_max(3)
+      |> docuconf.default([1, 4]),
+    )
+    docuconf.succeed(shards)
+  }
+  let assert [_] = docuconf.check_declaration(bad_default)
 }
 
 pub fn bad_int_test() {
@@ -894,7 +945,24 @@ pub fn javascript_int_range_test() {
         )
       let assert [#("N", "out_of_range")] =
         codes(load(unbounded, [#("N", "-9007199254740992")]))
+      // int lists carry the same range through itemMin and itemMax.
+      let assert True =
+        string.contains(
+          cue,
+          "\t\t\titemMin: -9007199254740991\n\t\t\titemMax: 9007199254740991\n",
+        )
+      cue_vet(cue)
       let assert [_, _] = docuconf.check_declaration(wide)
+      let wide_items = {
+        use ns <- docuconf.env(
+          docuconf.int_list("NS", "Big numbers", separator: ",")
+          |> docuconf.item_min(-two_53)
+          |> docuconf.item_max(two_53)
+          |> docuconf.optional,
+        )
+        docuconf.succeed(ns)
+      }
+      let assert [_, _] = docuconf.check_declaration(wide_items)
       let defaulted = {
         use n <- docuconf.env(
           docuconf.int("N", "A big number")
@@ -908,6 +976,7 @@ pub fn javascript_int_range_test() {
     _ -> {
       let assert False = string.contains(cue, "min")
       let assert False = string.contains(cue, "max")
+      let assert False = string.contains(cue, "itemM")
       let assert Ok(#(Some(n), Some([1, m]))) =
         load(unbounded, [
           #("N", "9007199254740993"),

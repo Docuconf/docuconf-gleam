@@ -244,7 +244,7 @@ const outside_safe_range = "is outside ±9007199254740991, the integers the Java
 @external(javascript, "./docuconf_ffi.mjs", "int_limits")
 fn int_limits() -> Result(#(Int, Int), Nil)
 
-fn within_limits(b: VarBuilder(Int), n: Int, what: String) -> VarBuilder(Int) {
+fn within_limits(b: VarBuilder(a), n: Int, what: String) -> VarBuilder(a) {
   case int_limits() {
     Ok(#(lo, hi)) if n < lo || n > hi ->
       add_problem(
@@ -360,13 +360,27 @@ pub fn string_list(
   list_builder(name, description, separator, "string", Ok, json.String)
 }
 
-/// A list of integers in the `csv` encoding, joined by `separator`.
+/// A list of 64-bit integers in the `csv` encoding, joined by `separator`.
+/// Bound each item with `item_min` and `item_max`.
+///
+/// On the JavaScript target the list always exports `itemMin` and `itemMax`
+/// within ±(2^53 − 1), as `int` does for `min` and `max` (SPEC §5).
 pub fn int_list(
   name: String,
   description: String,
   separator separator: String,
 ) -> VarBuilder(List(Int)) {
-  list_builder(name, description, separator, "int", parse_int, json.Int)
+  let b = list_builder(name, description, separator, "int", parse_int, json.Int)
+  case int_limits() {
+    Error(Nil) -> b
+    Ok(#(lo, hi)) ->
+      b
+      |> set_field("itemMin", json.Int(lo))
+      |> set_field("itemMax", json.Int(hi))
+      |> add_check(fn(l) {
+        each_item(l, fn(v) { bound(v < lo || v > hi, outside_safe_range) })
+      })
+  }
 }
 
 fn list_builder(
@@ -571,6 +585,42 @@ pub fn max_int(b: VarBuilder(Int), n: Int) -> VarBuilder(Int) {
   set_field(b, "max", json.Int(n))
   |> within_limits(n, "max_int")
   |> add_check(fn(v) { bound(v > n, "above max " <> int.to_string(n)) })
+}
+
+/// The smallest item an int list may hold, exported as `itemMin`. An item
+/// below it is `out_of_range`.
+pub fn item_min(b: VarBuilder(List(Int)), n: Int) -> VarBuilder(List(Int)) {
+  set_field(b, "itemMin", json.Int(n))
+  |> within_limits(n, "item_min")
+  |> add_check(fn(l) {
+    each_item(l, fn(v) { bound(v < n, "below itemMin " <> int.to_string(n)) })
+  })
+}
+
+/// The largest item an int list may hold, exported as `itemMax`. An item
+/// above it is `out_of_range`.
+pub fn item_max(b: VarBuilder(List(Int)), n: Int) -> VarBuilder(List(Int)) {
+  set_field(b, "itemMax", json.Int(n))
+  |> within_limits(n, "item_max")
+  |> add_check(fn(l) {
+    each_item(l, fn(v) { bound(v > n, "above itemMax " <> int.to_string(n)) })
+  })
+}
+
+// Checks every item, naming the first that fails (counting from 1).
+fn each_item(
+  items: List(a),
+  check: fn(a) -> Result(Nil, Problem),
+) -> Result(Nil, Problem) {
+  items
+  |> list.index_map(fn(item, i) { #(item, i) })
+  |> list.try_each(fn(pair) {
+    case check(pair.0) {
+      Ok(Nil) -> Ok(Nil)
+      Error(#(code, msg)) ->
+        Error(#(code, "item " <> int.to_string(pair.1 + 1) <> " " <> msg))
+    }
+  })
 }
 
 pub fn min_float(b: VarBuilder(Float), n: Float) -> VarBuilder(Float) {

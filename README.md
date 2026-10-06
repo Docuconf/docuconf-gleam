@@ -131,7 +131,7 @@ gleam run -m orders/contract
 | `url` | `url` | `String` | `schemes` |
 | `enum(name, desc, [#("debug", Debug), ...])` | `enum` | your own type | |
 | `string_list(name, desc, separator: ",")` | `list` (`csv`) | `List(String)` | `min_items`, `max_items` |
-| `int_list(name, desc, separator: ",")` | `list` (`csv`) | `List(Int)` | `min_items`, `max_items` |
+| `int_list(name, desc, separator: ",")` | `list` (`csv`) | `List(Int)` | `min_items`, `max_items`, `item_min`, `item_max` |
 | `json(name, desc, decoder, placeholder, encode)` | `json` | your own type | `schema` |
 
 Every builder also takes `secret`, `group`, `examples`, `config_key`,
@@ -149,9 +149,21 @@ Every builder also takes `secret`, `group`, `examples`, `config_key`,
   range (SPEC §5): `-9007199254740991` and `9007199254740991` unless
   `min_int`/`max_int` narrow them. Wider bounds or defaults are declaration
   errors, and a value beyond the range is `out_of_range` at boot rather
-  than silently rounded. The Erlang target accepts the whole 64-bit range,
+  than silently rounded. `int_list` does the same for its items through
+  `itemMin` and `itemMax`. The Erlang target accepts the whole 64-bit range,
   so the same declaration can export different bounds per target; pin them
-  with `min_int`/`max_int` if the contract must not depend on the target.
+  with `min_int`/`max_int` (or `item_min`/`item_max`) if the contract must
+  not depend on the target.
+- **Item bounds**: `item_min` and `item_max` bound every item of an
+  `int_list` and are exported as `itemMin` and `itemMax`. An item outside
+  them is `out_of_range`:
+
+  ```gleam
+  docuconf.int_list("SHARDS", "Shard ids this instance owns", separator: ",")
+  |> docuconf.item_min(0)
+  |> docuconf.item_max(1023)
+  |> docuconf.optional
+  ```
 - **Empty strings** are present values for `string` and unset for every
   other type. Values are never trimmed.
 - **`json` and config files** decode into your own type with a
@@ -235,9 +247,6 @@ Compared with the specification and the Elixir SDK:
 - JSON Schemas are not generated from types (Gleam has no reflection) and
   are not checked at boot. The decoder is the boot-time check.
 - No `.env` loading, no contract-first mode, no profiles (SPEC §4.4).
-- `int_list` items on JavaScript: the contract has no per-item bounds, so
-  the platform may accept an item beyond ±(2^53 − 1); the boot check then
-  rejects it as `out_of_range`.
 
 ## Development
 

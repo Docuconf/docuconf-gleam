@@ -211,6 +211,8 @@ pub fn spec() -> docuconf.Spec(Sample) {
   )
   use worker_ports <- docuconf.env(
     docuconf.int_list("WORKER_PORTS", "Ports the workers bind", separator: ";")
+    |> docuconf.item_min(1)
+    |> docuconf.item_max(65_535)
     |> docuconf.optional,
   )
   use rate_limits <- docuconf.env(

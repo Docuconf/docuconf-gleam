@@ -118,6 +118,8 @@ contract.#Contract & {
 			items: "int"
 			encoding: "csv"
 			separator: ";"
+			itemMin: 1
+			itemMax: 65535
 		}
 	}
 	files: {
