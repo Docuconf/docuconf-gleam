@@ -388,7 +388,7 @@ pub fn bad_int_test() {
   let root = file_root()
   let assert [#("PORT", "invalid_type")] =
     codes(load(root, [#("PORT", "80.5")]))
-  let assert [#("PORT", "invalid_type")] =
+  let assert [#("PORT", "out_of_range")] =
     codes(load(root, [#("PORT", "99999999999999999999")]))
   // Values are never trimmed.
   let assert [#("PORT", "invalid_type")] =
@@ -914,8 +914,10 @@ pub fn int64_range_test() {
         |> docuconf.without_termination_log,
     )
   }
-  let assert [#("N", "invalid_type")] = codes(load("9223372036854775808"))
-  let assert [#("N", "invalid_type")] = codes(load("-9223372036854775809"))
+  let assert [#("N", "out_of_range")] = codes(load("9223372036854775808"))
+  let assert [#("N", "out_of_range")] = codes(load("-9223372036854775809"))
+  let assert [#("N", "out_of_range")] = codes(load("99999999999999999999"))
+  let assert [#("N", "invalid_type")] = codes(load("1e3"))
   case support.target() {
     "erlang" -> {
       let assert Ok(n) = load("9223372036854775807")

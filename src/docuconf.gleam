@@ -1024,7 +1024,8 @@ fn parse_int(s: String) -> Result(Int, Problem) {
     False -> Error(#(InvalidType, "is not an integer"))
     True ->
       case fits_int64(s, body) {
-        False -> Error(#(InvalidType, "is outside the 64-bit integer range"))
+        // SPEC §5: a well-formed integer beyond 64 bits is out of range.
+        False -> Error(#(OutOfRange, "is outside the 64-bit integer range"))
         True -> {
           let assert Ok(n) = int.parse(string.replace(s, "+", ""))
           case int_limits() {
