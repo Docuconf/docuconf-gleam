@@ -258,5 +258,4 @@ source checkouts of the dependencies (see the script).
 
 ## Licence
 
-The licence has not been chosen yet, so this repository has no LICENSE file.
-Do not publish the package until one is added (see [RELEASING.md](RELEASING.md)).
+MIT. See [LICENSE](LICENSE).

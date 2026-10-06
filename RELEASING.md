@@ -12,15 +12,13 @@ Gleam (change `name` in `gleam.toml`; the module names can stay).
 
 ## Before the first release
 
-1. **Choose a licence.** Add a `LICENSE` file and `licences = ["..."]` to
-   `gleam.toml`. `gleam publish` refuses to publish without it.
-2. **Settle the package name** (see the note above).
-3. **Create an API key.** Hex has no OIDC trusted publishing. Create a key
+1. **Settle the package name** (see the note above).
+2. **Create an API key.** Hex has no OIDC trusted publishing. Create a key
    that can publish (`mix hex.user key generate --permission api:write`, or
    on hex.pm under Dashboard, Keys) and store it as the `HEXPM_API_KEY`
    secret of a GitHub environment named `hex`. Restrict that environment
    to `v*` tags, and add a required reviewer if you want one.
-4. Check the package locally: `gleam export hex-tarball` builds the tarball
+3. Check the package locally: `gleam export hex-tarball` builds the tarball
    that would be published, and `gleam docs build` builds the docs.
 
 ## Each release
