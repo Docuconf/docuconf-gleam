@@ -1,0 +1,14 @@
+name = "orders"
+version = "0.1.0"
+description = "The docuconf orders example: a small wisp service with a typed configuration contract."
+target = "erlang"
+
+[dependencies]
+# The SDK in this repository, not a published version.
+docuconf = { path = "../.." }
+gleam_stdlib = ">= 1.0.0 and < 2.0.0"
+gleam_erlang = ">= 1.0.0 and < 2.0.0"
+gleam_http = ">= 4.0.0 and < 5.0.0"
+gleam_json = ">= 3.0.0 and < 4.0.0"
+mist = ">= 6.0.0 and < 7.0.0"
+wisp = ">= 2.2.2 and < 3.0.0"

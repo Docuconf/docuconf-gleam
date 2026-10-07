@@ -3,6 +3,9 @@
 Typed configuration contracts for Gleam applications, from the
 [docuconf specification](https://github.com/docuconf/docuconf-go/blob/main/spec/SPEC.md) (v1alpha1).
 
+**Example:** [`examples/orders`](examples/orders), a small wisp service with
+its exported `contract.cue`.
+
 Gleam has no macros and no reflection. Its config idiom is to read the
 environment with [`envoy`](https://hexdocs.pm/envoy) and decode values with
 `gleam/dynamic/decode`. docuconf follows that idiom with typed builders,
@@ -143,8 +146,8 @@ Every builder also takes `secret`, `group`, `examples`, `config_key`,
 finished variable's value with `map` if you like.
 
 - **Encodings** (SPEC §5): lists are `Csv(separator)` (`a,b`), `JsonArray`
-  (`["a","b"]`) or `Indexed` (`NAME__0=a`, `NAME__1=b`, up to the first
-  missing index); durations are `Go` (`1m30s`), `Iso8601` (`PT90S`),
+  (`["a","b"]`) or `Indexed` (`NAME__0=a`, `NAME__1=b`, numbered from 0
+  with no gap, or the variable is `invalid_type`); durations are `Go` (`1m30s`), `Iso8601` (`PT90S`),
   `Seconds` (`90`, `1.5`) or `Timespan` (`[d.]hh:mm:ss[.fff]`). The contract
   records the encoding, and the platform renders values to match. The
   parsers are also public: `duration.parse_iso8601`, `parse_seconds` and
@@ -318,7 +321,9 @@ generate certificates with `openssl`. Regenerate the golden file with
 `UPDATE_GOLDEN=1 gleam test`.
 
 Where Hex is unreachable, `scripts/offline-test.sh` runs the tests against
-source checkouts of the dependencies (see the script).
+source checkouts of the dependencies (see the script). With wisp, mist and
+their dependencies checked out too, it also builds `examples/orders`,
+compares its exported contract and runs its `smoke.sh`.
 
 ## Licence
 

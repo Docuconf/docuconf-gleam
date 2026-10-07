@@ -53,3 +53,52 @@ jobs:
           DOCUCONF_REQUIRE_VET: "1"
           DOCUCONF_CONFORMANCE: ${{ github.workspace }}/docuconf-go/conformance/cases.json
           DOCUCONF_REQUIRE_CONFORMANCE: "1"
+
+  # examples/orders: build it against this SDK, check its committed
+  # contract.cue is what the app exports, vet it, and smoke-test the service.
+  example:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: examples/orders
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/checkout@v4
+        with:
+          repository: docuconf/docuconf-go
+          path: docuconf-go
+
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: "27"
+          gleam-version: "1.18.1"
+          rebar3-version: "3"
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: false
+
+      - name: Install cue
+        run: go install cuelang.org/go/cmd/cue@v0.17.1
+
+      - run: gleam deps download
+      - run: gleam format --check src
+      - run: gleam build --warnings-as-errors
+
+      - name: Re-export the contract and compare
+        run: |
+          gleam run -m orders/contract
+          git diff --exit-code -- contract.cue
+
+      - name: Vet the contract against the meta-schema
+        run: |
+          vet=$(mktemp -d)
+          cp -r "$GITHUB_WORKSPACE/docuconf-go/spec/cue/cue.mod" "$GITHUB_WORKSPACE/docuconf-go/spec/cue/contract" "$vet/"
+          mkdir "$vet/orders"
+          cp contract.cue "$vet/orders/"
+          cd "$vet" && cue vet -c ./orders
+
+      - name: Smoke test
+        run: ./smoke.sh
