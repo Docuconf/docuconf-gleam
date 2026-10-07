@@ -3,6 +3,9 @@
 Typed configuration contracts for Gleam applications, from the
 [docuconf specification](https://github.com/docuconf/docuconf-go/blob/main/spec/SPEC.md) (v1alpha1).
 
+**Example:** [`examples/orders`](examples/orders), a small wisp service with
+its exported `contract.cue`.
+
 Gleam has no macros and no reflection. Its config idiom is to read the
 environment with [`envoy`](https://hexdocs.pm/envoy) and decode values with
 `gleam/dynamic/decode`. docuconf follows that idiom with typed builders,
@@ -318,7 +321,9 @@ generate certificates with `openssl`. Regenerate the golden file with
 `UPDATE_GOLDEN=1 gleam test`.
 
 Where Hex is unreachable, `scripts/offline-test.sh` runs the tests against
-source checkouts of the dependencies (see the script).
+source checkouts of the dependencies (see the script). With wisp, mist and
+their dependencies checked out too, it also builds `examples/orders`,
+compares its exported contract and runs its `smoke.sh`.
 
 ## Licence
 

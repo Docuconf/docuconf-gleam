@@ -1,0 +1,4 @@
+/build
+erl_crash.dump
+# Resolved from gleam.toml when the example is built.
+manifest.toml
