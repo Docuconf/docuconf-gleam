@@ -8,13 +8,8 @@ import gleam/int
 import gleam/list
 import gleam/option.{None, Some}
 import gleam/string
-import gleeunit
 import sample
 import support
-
-pub fn main() -> Nil {
-  gleeunit.main()
-}
 
 // ---- helpers ------------------------------------------------------------------
 
