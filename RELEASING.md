@@ -1,18 +1,20 @@
 # Releasing
 
-The package is published to [Hex](https://hex.pm/packages/docuconf) with
-`gleam publish`, by `.github/workflows/release.yml` when a `v*` tag is
-pushed. Docs go to HexDocs at the same time.
+The package is published to [Hex](https://hex.pm/packages/docuconf_gleam)
+as `docuconf_gleam` with `gleam publish`, by
+`.github/workflows/release.yml` when a `v*` tag is pushed. Docs go to
+HexDocs at the same time.
 
-Note: the Elixir SDK (docuconf-elixir) is also named `docuconf` on Hex.
-Hex has one namespace for Erlang, Elixir and Gleam packages, so the two
-cannot both be published as `docuconf`. Decide on the names before the
-first release, for example `docuconf` for Elixir and `docuconf_gleam` for
-Gleam (change `name` in `gleam.toml`; the module names can stay).
+The Hex name is `docuconf_gleam` because Hex has one namespace for Erlang,
+Elixir and Gleam packages, and the Elixir SDK (docuconf-elixir) is named
+`docuconf`. The module names stay `docuconf`, `docuconf/duration` and so
+on, so code reads `import docuconf` either way.
 
 ## Before the first release
 
-1. **Settle the package name** (see the note above).
+1. **Check the name is free**: <https://hex.pm/packages/docuconf_gleam>
+   should not exist yet. After the release, change the README's Install
+   section from the git dependency to `gleam add docuconf_gleam`.
 2. **Create an API key.** Hex has no OIDC trusted publishing. Create a key
    that can publish (`mix hex.user key generate --permission api:write`, or
    on hex.pm under Dashboard, Keys) and store it as the `HEXPM_API_KEY`
@@ -76,3 +78,26 @@ mkdir -p vendor/docuconf && tar -xOf docuconf-0.1.0.tar contents.tar.gz | tar -x
 [dependencies]
 docuconf = { path = "vendor/docuconf" }
 ```
+
+## docuconf-go version
+
+The spec, the CUE meta-schema and the shared conformance suite live in
+[docuconf-go](https://github.com/Docuconf/docuconf-go). `.github/docuconf-go.ref` holds the full docuconf-go commit SHA
+this SDK is tested against.
+
+- **Push and pull request CI** check out docuconf-go at that commit, so a change in docuconf-go never breaks this
+  repository's CI by surprise.
+- **Bump pull requests.** `.github/workflows/docuconf-go-bump.yml` opens (or updates) a
+  `build(deps): bump docuconf-go to <sha>` pull request on the `docuconf-go-bump` branch whenever docuconf-go's `main`
+  moves: on a `docuconf-go-updated` dispatch from docuconf-go, and daily as a catch-up. CI on that pull request is the
+  compatibility check; merge it when it is green. Run the workflow by hand (optionally with a `sha`) to pin a
+  specific commit.
+- **Nightly.** CI also runs every night against docuconf-go `main`, and can be started by hand with a
+  `docuconf_go_ref` input to try any branch or commit.
+- **`scripts/conformance.sh`** runs just the shared conformance suite and the `cue vet` tests against a docuconf-go
+  checkout: `DOCUCONF_GO_DIR=../docuconf-go scripts/conformance.sh`. docuconf-go runs it on every pull request that
+  touches the spec, so a breaking spec change shows up there before it merges.
+
+Without the release GitHub App (`RELEASE_APP_ID` and `RELEASE_APP_PRIVATE_KEY`), the bump pull request is created with
+`GITHUB_TOKEN`, which starts no workflows, so the bump workflow starts CI on the branch itself. That needs
+**Settings → Actions → General → Allow GitHub Actions to create and approve pull requests**.

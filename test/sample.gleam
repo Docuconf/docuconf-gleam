@@ -1,6 +1,6 @@
 //// Every variable type and every file type, for the export golden test.
 
-import docuconf.{type CaBundle, type Tls}
+import docuconf.{type CaBundle, type Secret, type Tls}
 import docuconf/duration.{type Duration}
 import docuconf/json
 import gleam/dynamic/decode
@@ -23,7 +23,7 @@ pub type Route {
 
 pub type Sample {
   Sample(
-    database_url: String,
+    database_url: Secret(String),
     port: Int,
     gomemlimit: Option(Int),
     sample_rate: Float,
@@ -35,7 +35,7 @@ pub type Sample {
     worker_ports: Option(List(Int)),
     rate_limits: Option(RateLimits),
     region: String,
-    keystore_password: Option(String),
+    keystore_password: Option(Secret(String)),
     routes: List(Route),
     serving_tls: Tls,
     upstream_ca: Option(CaBundle),
@@ -180,8 +180,8 @@ pub fn spec() -> docuconf.Spec(Sample) {
   )
   use request_timeout <- docuconf.env(
     docuconf.duration("REQUEST_TIMEOUT", "Upstream request timeout")
-    |> docuconf.min_duration("1s")
-    |> docuconf.max_duration("5m")
+    |> docuconf.min_duration(duration.seconds(1))
+    |> docuconf.max_duration(duration.minutes(5))
     |> docuconf.default(duration.seconds(30)),
   )
   use public_url <- docuconf.env(
@@ -219,9 +219,8 @@ pub fn spec() -> docuconf.Spec(Sample) {
     docuconf.json(
       "RATE_LIMITS",
       "Default per-client rate limits",
-      rate_limits_decoder(),
-      RateLimits(0, None),
-      encode_rate_limits,
+      decoder: rate_limits_decoder(),
+      encode: encode_rate_limits,
     )
     |> docuconf.schema(rate_limits_schema())
     |> docuconf.optional,
@@ -246,7 +245,6 @@ pub fn spec() -> docuconf.Spec(Sample) {
       "Routing table: path prefixes and their upstreams",
       path: "/etc/gateway/routes/routes.json",
       decoder: routes_decoder(),
-      placeholder: [],
     )
     |> docuconf.path_env("ROUTES_FILE")
     |> docuconf.max_size(65_536)
@@ -261,7 +259,7 @@ pub fn spec() -> docuconf.Spec(Sample) {
     )
     |> docuconf.dns_names(["gateway.internal", "api.example.com"])
     |> docuconf.key_algorithms([docuconf.Ecdsa, docuconf.Rsa])
-    |> docuconf.min_remaining("720h")
+    |> docuconf.min_remaining(duration.hours(720))
     |> docuconf.require_ca
     |> docuconf.file_required,
   )
@@ -302,25 +300,26 @@ pub fn spec() -> docuconf.Spec(Sample) {
     |> docuconf.max_size(134_217_728)
     |> docuconf.file_optional,
   )
-  docuconf.succeed(Sample(
-    database_url:,
-    port:,
-    gomemlimit:,
-    sample_rate:,
-    debug:,
-    request_timeout:,
-    public_url:,
-    log_level:,
-    allowed_origins:,
-    worker_ports:,
-    rate_limits:,
-    region:,
-    keystore_password:,
-    routes:,
-    serving_tls:,
-    upstream_ca:,
-    partner_keystore:,
-    license:,
-    geoip:,
-  ))
+  use v <- docuconf.build
+  Sample(
+    database_url: database_url(v),
+    port: port(v),
+    gomemlimit: gomemlimit(v),
+    sample_rate: sample_rate(v),
+    debug: debug(v),
+    request_timeout: request_timeout(v),
+    public_url: public_url(v),
+    log_level: log_level(v),
+    allowed_origins: allowed_origins(v),
+    worker_ports: worker_ports(v),
+    rate_limits: rate_limits(v),
+    region: region(v),
+    keystore_password: keystore_password(v),
+    routes: routes(v),
+    serving_tls: serving_tls(v),
+    upstream_ca: upstream_ca(v),
+    partner_keystore: partner_keystore(v),
+    license: license(v),
+    geoip: geoip(v),
+  )
 }

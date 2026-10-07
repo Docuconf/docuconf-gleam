@@ -4,6 +4,15 @@ on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    # Nightly against docuconf-go main; push and pull_request use .github/docuconf-go.ref.
+    - cron: "23 5 * * *"
+  workflow_dispatch:
+    inputs:
+      docuconf_go_ref:
+        description: docuconf-go ref to test against (empty means .github/docuconf-go.ref)
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -18,12 +27,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Pick the docuconf-go ref
+        id: dcref
+        env:
+          EVENT: ${{ github.event_name }}
+          OVERRIDE: ${{ inputs.docuconf_go_ref }}
+        run: |
+          if [ "$EVENT" = schedule ]; then echo "ref=main" >> "$GITHUB_OUTPUT"
+          elif [ -n "$OVERRIDE" ]; then echo "ref=$OVERRIDE" >> "$GITHUB_OUTPUT"
+          else echo "ref=$(tr -d '[:space:]' < .github/docuconf-go.ref)" >> "$GITHUB_OUTPUT"; fi
+
       # The contract meta-schema (spec/cue) and the conformance suite
       # (conformance/cases.json) live in docuconf-go; the export test vets
       # generated contracts against the first, the runner reads the second.
-      - uses: actions/checkout@v4
+      - name: Check out docuconf-go
+        uses: actions/checkout@v4
         with:
           repository: docuconf/docuconf-go
+          ref: ${{ steps.dcref.outputs.ref }}
           path: docuconf-go
 
       - uses: erlef/setup-beam@v1
@@ -54,6 +75,11 @@ jobs:
           DOCUCONF_CONFORMANCE: ${{ github.workspace }}/docuconf-go/conformance/cases.json
           DOCUCONF_REQUIRE_CONFORMANCE: "1"
 
+      - name: Run scripts/conformance.sh
+        run: DOCUCONF_GO_DIR="$GITHUB_WORKSPACE/docuconf-go" scripts/conformance.sh
+        env:
+          GLEAM_TARGET: ${{ matrix.target }}
+
   # examples/orders: build it against this SDK, check its committed
   # contract.cue is what the app exports, vet it, and smoke-test the service.
   example:
@@ -64,9 +90,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/checkout@v4
+      - name: Pick the docuconf-go ref
+        id: dcref
+        working-directory: .
+        env:
+          EVENT: ${{ github.event_name }}
+          OVERRIDE: ${{ inputs.docuconf_go_ref }}
+        run: |
+          if [ "$EVENT" = schedule ]; then echo "ref=main" >> "$GITHUB_OUTPUT"
+          elif [ -n "$OVERRIDE" ]; then echo "ref=$OVERRIDE" >> "$GITHUB_OUTPUT"
+          else echo "ref=$(tr -d '[:space:]' < .github/docuconf-go.ref)" >> "$GITHUB_OUTPUT"; fi
+      - name: Check out docuconf-go
+        uses: actions/checkout@v4
         with:
           repository: docuconf/docuconf-go
+          ref: ${{ steps.dcref.outputs.ref }}
           path: docuconf-go
 
       - uses: erlef/setup-beam@v1
@@ -84,8 +122,10 @@ jobs:
         run: go install cuelang.org/go/cmd/cue@v0.17.1
 
       - run: gleam deps download
-      - run: gleam format --check src
+      - run: gleam format --check src dev test
       - run: gleam build --warnings-as-errors
+      # Config tests, and check_contract against the committed contract.cue.
+      - run: gleam test
 
       - name: Re-export the contract and compare
         run: |

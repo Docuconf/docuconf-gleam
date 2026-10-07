@@ -1,5 +1,5 @@
 -module(docuconf_test_ffi).
--export([shell/1, target/0, read_file/1]).
+-export([shell/1, target/0, read_file/1, remember/1, recall/0]).
 
 target() -> <<"erlang">>.
 
@@ -19,4 +19,20 @@ read_file(Path) ->
     case file:read_file(Path) of
         {ok, Bin} -> {ok, Bin};
         {error, _} -> {error, nil}
+    end.
+
+%% A list of strings kept in the process dictionary, for callbacks.
+remember(S) ->
+    put(docuconf_remembered, [S | recall_raw()]),
+    nil.
+
+recall() ->
+    L = lists:reverse(recall_raw()),
+    erase(docuconf_remembered),
+    L.
+
+recall_raw() ->
+    case get(docuconf_remembered) of
+        undefined -> [];
+        L -> L
     end.

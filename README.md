@@ -3,45 +3,76 @@
 Typed configuration contracts for Gleam applications, from the
 [docuconf specification](https://github.com/docuconf/docuconf-go/blob/main/spec/SPEC.md) (v1alpha1).
 
-**Example:** [`examples/orders`](examples/orders), a small wisp service with
-its exported `contract.cue`.
+You declare every environment variable and file your app reads, once. From
+that declaration you get:
 
-Gleam has no macros and no reflection. Its config idiom is to read the
-environment with [`envoy`](https://hexdocs.pm/envoy) and decode values with
-`gleam/dynamic/decode`. docuconf follows that idiom with typed builders,
-combined with `use` the way decoders are. From one declaration you get:
-
-- a typed value for your app, or **every** problem at once, each with a
-  stable error code. Secret values are never printed, and the report is also
-  written to `/dev/termination-log` so `kubectl describe pod` shows it;
+- a typed config value at boot, or **every** problem at once, each with a
+  stable error code. Secret values are never printed, and the report also
+  goes to `/dev/termination-log`, so `kubectl describe pod` shows it;
 - boot checks for files: JSON config decoded into your own type, TLS key
-  pairs (key match, expiry and `minRemaining`, DNS names, key algorithm,
-  chain to `ca.crt`), CA bundles, text and binary files;
+  pairs (key match, expiry, DNS names, key algorithm, chain to `ca.crt`), CA
+  bundles, keystores, text and binary files;
 - `contract.cue`, a CUE document the platform validates before it deploys.
 
 It runs on both targets: Erlang (OTP 27 or later) and JavaScript (Node.js).
-Dependencies: `gleam_stdlib` and `envoy`.
+Its only dependencies are `gleam_stdlib` and `envoy`. The package is
+`docuconf_gleam`; its modules are `docuconf`, `docuconf/duration`,
+`docuconf/json` and `docuconf/contract_first`.
 
-## Example
+The steps below follow [`examples/orders`](examples/orders), a small wisp
+service. Every Gleam snippet in this README is compiled in CI.
+
+## 1. Install
+
+docuconf is not on Hex yet. Depend on it from git, in `gleam.toml`:
+
+```toml
+[dependencies]
+docuconf_gleam = { git = "https://github.com/docuconf/docuconf-gleam", ref = "main" }
+```
+
+Then run `gleam deps download`. To work from a local checkout instead:
+
+```sh
+git clone https://github.com/docuconf/docuconf-gleam ../docuconf-gleam
+```
+
+```toml
+docuconf_gleam = { path = "../docuconf-gleam" }
+```
+
+Once the first release is on Hex, `gleam add docuconf_gleam` will do. (The
+Hex name `docuconf` belongs to the Elixir SDK.)
+
+## 2. Declare your configuration
+
+One module holds the declaration. Each `use` line declares one variable,
+and `build` makes your config from the values:
 
 ```gleam
-import docuconf
+import docuconf.{type Secret}
 import docuconf/duration.{type Duration}
-import gleam/dynamic/decode
-
-pub type Pricing {
-  Pricing(currency: String)
-}
+import gleam/json.{type Json}
+import gleam/result
+import wisp
 
 pub type Config {
   Config(
     port: Int,
-    database_url: String,
-    timeout: Duration,
-    pricing: Pricing,
-    tls: docuconf.Tls,
+    log_level: wisp.LogLevel,
+    database_url: Secret(String),
+    allowed_origins: List(String),
+    request_timeout: Duration,
+    worker_count: Int,
   )
 }
+
+const log_levels = [
+  #("debug", wisp.DebugLevel),
+  #("info", wisp.InfoLevel),
+  #("warn", wisp.WarningLevel),
+  #("error", wisp.ErrorLevel),
+]
 
 pub fn spec() -> docuconf.Spec(Config) {
   use port <- docuconf.env(
@@ -50,68 +81,194 @@ pub fn spec() -> docuconf.Spec(Config) {
     |> docuconf.max_int(65_535)
     |> docuconf.default(8080),
   )
+  use log_level <- docuconf.env(
+    docuconf.enum("LOG_LEVEL", "Minimum log level emitted", log_levels)
+    |> docuconf.default(wisp.InfoLevel),
+  )
+  // A secret is exported as `secret: true`: the platform supplies it from a
+  // Secret. docuconf never prints its value, and the app gets a
+  // `docuconf.Secret`, which prints redacted; `docuconf.reveal` reads it.
   use database_url <- docuconf.env(
     docuconf.url("DATABASE_URL", "Primary Postgres connection string")
     |> docuconf.schemes(["postgres"])
     |> docuconf.secret
     |> docuconf.required,
   )
-  use timeout <- docuconf.env(
-    docuconf.duration("CHECKOUT_TIMEOUT", "Checkout request timeout")
-    |> docuconf.max_duration("1m")
-    |> docuconf.default(duration.seconds(15)),
-  )
-  use pricing <- docuconf.file(
-    docuconf.config_file(
-      "pricing",
-      "Pricing rules: currency and discount tiers",
-      path: "/etc/orders/pricing/pricing.json",
-      decoder: {
-        use currency <- decode.field("currency", decode.string)
-        decode.success(Pricing(currency:))
-      },
-      placeholder: Pricing(""),
+  use allowed_origins <- docuconf.env(
+    docuconf.string_list(
+      "ALLOWED_ORIGINS",
+      "Origins allowed to call the API (CORS), comma-separated",
+      separator: ",",
     )
-    |> docuconf.file_required,
+    |> docuconf.min_items(1)
+    |> docuconf.default(["http://localhost:3000"]),
   )
-  use tls <- docuconf.file(
-    docuconf.tls("serving-tls", "Certificate the API serves HTTPS with", path: "/etc/orders/tls")
-    |> docuconf.dns_names(["orders.internal"])
-    |> docuconf.min_remaining("720h")
-    |> docuconf.file_required,
+  use request_timeout <- docuconf.env(
+    docuconf.duration("REQUEST_TIMEOUT", "Timeout for one API request")
+    |> docuconf.min_duration(duration.seconds(1))
+    |> docuconf.max_duration(duration.minutes(5))
+    |> docuconf.default(duration.seconds(30)),
   )
-  docuconf.succeed(Config(port:, database_url:, timeout:, pricing:, tls:))
+  use worker_count <- docuconf.env(
+    docuconf.int("WORKER_COUNT", "Background workers that process orders")
+    |> docuconf.min_int(1)
+    |> docuconf.max_int(64)
+    |> docuconf.default(4),
+  )
+  // Each `use` above bound a handle; `build` reads the values once they
+  // have all loaded and passed their checks.
+  use v <- docuconf.build
+  Config(
+    port: port(v),
+    log_level: log_level(v),
+    database_url: database_url(v),
+    allowed_origins: allowed_origins(v),
+    request_timeout: request_timeout(v),
+    worker_count: worker_count(v),
+  )
 }
-
-pub fn main() {
-  case docuconf.load(spec()) {
-    Ok(config) -> start(config)
-    Error(error) -> panic as docuconf.describe(error)
-  }
-}
 ```
 
-A bad environment reports everything at once:
+What to know:
 
-```
-docuconf: 3 configuration problems:
-  - DATABASE_URL [missing_required]: required, but not set
-  - PORT [out_of_range]: "0" is below min 1
-  - serving-tls [certificate_expiring]: certificate expires in 1366205s, less than minRemaining (2592000s)
-```
+- **A `use` line binds a handle, not a value.** `port` is a
+  `fn(Values) -> Int`. Call it inside `build` to get the `Int`:
+  `port(v)`. `build` runs once, at load time, after every input has loaded
+  and passed its checks. So the declaration never depends on what the
+  environment holds: the exported contract lists every variable, and your
+  code never runs on a made-up value.
+- **Finish every variable** with `required`, `optional` (an `Option`) or
+  `default(value)`. If the compiler says it expected `Var(a)` but found
+  `VarBuilder(a)`, you forgot to.
+- **Secrets** come back as `docuconf.Secret(String)`. `string.inspect`,
+  `echo` and crash reports print it as `Secret(//fn() { ... })`;
+  `docuconf.reveal` reads the value. Put `secret` after the constraints.
+- **To decide on a value, declare first, then decide in `build`.** A
+  variable used only when a flag is on is declared `optional` (the
+  contract lists it), and `build` reads it when the flag is set. A wrong
+  combination can be rejected with `try_map` on one variable, or after
+  loading.
 
-### Exporting the contract
+## 3. Run it
 
-Add a module to your app and run it in CI:
+Load the configuration first thing in `main`:
 
 ```gleam
-// src/orders/contract.gleam
+pub fn main() -> Nil {
+  // docuconf checks the whole environment before the app starts. On a
+  // problem it prints every one at once, each with a stable code, and
+  // exits with status 1.
+  let config = docuconf.load_or_exit(config.spec())
+
+  wisp.configure_logger()
+  wisp.set_logger_level(config.log_level)
+  // The secret prints as Secret(//fn() { ... }), never its value.
+  wisp.log_info("config: " <> string.inspect(config))
+  let assert Ok(_) =
+    wisp_mist.handler(handle(_, config), wisp.random_string(64))
+    |> mist.new
+    |> mist.bind("0.0.0.0")
+    |> mist.port(config.port)
+    |> mist.start
+  process.sleep_forever()
+}
+```
+
+`load_or_exit` returns the config, or prints every problem to stderr,
+writes the termination log and exits with status 1, on both targets. Use
+`load_with` to get a `Result` instead.
+
+## 4. See an error
+
+With `PORT=0` and no `DATABASE_URL`, the service does not start:
+
+```
+$ PORT=0 gleam run
+docuconf: 2 configuration problems:
+  - DATABASE_URL [missing_required]: required, but not set
+  - PORT [out_of_range]: "0" is below min 1
+```
+
+No stack trace, one line per problem, and a secret's value is never shown.
+Warnings go to stderr too, without values: a set variable whose name is
+close to a declared one, a secret ending with a newline, list items with
+spaces around them:
+
+```
+docuconf: warning: DATABSE_URL is set but not declared; did you mean DATABASE_URL?
+```
+
+## 5. Test your configuration
+
+`with_env` loads from a map instead of the process environment. Nothing
+else is read from the process: no termination log is written and warnings
+are dropped (`on_warning` takes them). A gleeunit test, `test/orders_test.gleam`:
+
+```gleam
 import docuconf
+import gleam/dict
+import gleeunit
 import orders/config
 
-pub fn main() {
-  let assert Ok(Nil) =
+pub fn main() -> Nil {
+  gleeunit.main()
+}
+
+fn load(env: List(#(String, String))) {
+  let options =
+    docuconf.options()
+    |> docuconf.with_env(dict.from_list(env))
+  docuconf.load_with(config.spec(), options)
+}
+
+pub fn declaration_test() {
+  assert docuconf.check_declaration(config.spec()) == []
+}
+
+pub fn defaults_test() {
+  let assert Ok(config) = load([#("DATABASE_URL", "postgres://u:p@db/orders")])
+  assert config.port == 8080
+  assert docuconf.reveal(config.database_url) == "postgres://u:p@db/orders"
+}
+
+pub fn bad_port_test() {
+  let assert Error(docuconf.InvalidConfig([violation])) =
+    load([#("DATABASE_URL", "postgres://db/orders"), #("PORT", "0")])
+  assert violation.input == "PORT"
+  assert violation.code == docuconf.OutOfRange
+}
+
+pub fn contract_is_up_to_date_test() {
+  assert docuconf.check_contract(
+      config.spec(),
+      name: "orders",
+      against: "contract.cue",
+    )
+    == Ok(Nil)
+}
+```
+
+`check_declaration` returns the declaration's problems (an enum default
+that is not one of its values, a constraint on the wrong type, a bad
+name...), so a broken declaration fails `gleam test` rather than boot.
+
+## 6. Export the contract
+
+Add a module in `dev/` (`dev/orders/contract.gleam`), so it is not part of
+your production build:
+
+```gleam
+import docuconf
+import gleam/io
+import orders/config
+
+pub fn main() -> Nil {
+  case
     docuconf.write_contract(config.spec(), name: "orders", to: "contract.cue")
+  {
+    Ok(Nil) -> io.println("wrote contract.cue")
+    Error(error) -> panic as docuconf.describe(error)
+  }
 }
 ```
 
@@ -119,8 +276,40 @@ pub fn main() {
 gleam run -m orders/contract
 ```
 
-`contract_with(spec, name, package, app_version)` sets the CUE package and
-`metadata.appVersion`.
+Commit `contract.cue`. The `check_contract` test above fails when the
+committed file is not what the declaration exports, with a line diff. No
+environment is needed to export, and none of your code runs.
+
+`contract_with(spec, name:, package:, app_version:)` sets the CUE package
+and `metadata.appVersion`.
+
+## 7. Deploy
+
+The platform reads `contract.cue`, not your Gleam code. Before a deploy it
+checks each environment's values with `docuconf vet`, or renders the
+Kubernetes env and volumes with `docuconf render`, both from the
+[docuconf CLI](https://github.com/docuconf/docuconf-go). A missing
+`DATABASE_URL` then fails the pipeline, not the pod. If a bad value still
+reaches a pod, `load_or_exit` stops it, and `kubectl describe pod` shows
+the report from the termination log.
+
+## Using it with wisp
+
+wisp has no configuration hook of its own, and needs none: load the
+config in `main` with `load_or_exit`, before the server starts, and pass
+it to your handler. [`examples/orders`](examples/orders) does exactly
+this; CI builds it, runs its tests and smoke-tests the running service.
+
+- `wisp.set_logger_level(config.log_level)`: declare the level as an
+  `enum` mapping strings to `wisp.LogLevel` values.
+- `wisp.log_info("config: " <> string.inspect(config))` is safe: secrets
+  print redacted.
+- `docuconf.enum_name(log_levels, config.log_level)` turns an enum value
+  back into its string, to serve or log it.
+
+---
+
+# Reference
 
 ## Variables
 
@@ -132,29 +321,52 @@ gleam run -m orders/contract
 | `bool` | `bool` | `Bool` (`true`/`false`, any case) | |
 | `duration` | `duration` (`go` encoding) | `docuconf/duration.Duration` | `min_duration`, `max_duration` |
 | `duration_with(name, desc, encoding: Iso8601)` | `duration` (`go`, `iso8601`, `seconds`, `timespan`) | `docuconf/duration.Duration` | `min_duration`, `max_duration` |
-| `url` | `url` | `String` | `schemes` |
+| `url` | `url` | `String` | `schemes`, `max_length` |
 | `enum(name, desc, [#("debug", Debug), ...])` | `enum` | your own type | |
-| `string_list(name, desc, separator: ",")` | `list` (`csv`) | `List(String)` | `min_items`, `max_items` |
+| `string_list(name, desc, separator: ",")` | `list` (`csv`) | `List(String)` | `min_items`, `max_items`, `item_min_length`, `item_max_length` |
 | `int_list(name, desc, separator: ",")` | `list` (`csv`) | `List(Int)` | `min_items`, `max_items`, `item_min`, `item_max` |
-| `string_list_with(name, desc, encoding: Indexed)` | `list` (`csv`, `json`, `indexed`) | `List(String)` | `min_items`, `max_items` |
+| `string_list_with(name, desc, encoding: Indexed)` | `list` (`csv`, `json`, `indexed`) | `List(String)` | `min_items`, `max_items`, `item_min_length`, `item_max_length` |
 | `int_list_with(name, desc, encoding: JsonArray)` | `list` (`csv`, `json`, `indexed`) | `List(Int)` | `min_items`, `max_items`, `item_min`, `item_max` |
-| `json(name, desc, decoder, placeholder, encode)` | `json` | your own type | `schema` |
+| `json(name, desc, decoder:, encode:)` | `json` | your own type | `schema`, `max_length` |
 
-Every builder also takes `secret`, `group`, `examples`, `config_key`,
-`deprecated` and `deploy_time_switch`. Finish each one with `required`,
-`optional` (a `None` when unset) or `default(value)`, and transform the
-finished variable's value with `map` if you like.
+Every builder also takes `secret` (the value becomes a `Secret(a)`),
+`group`, `examples`, `config_key`, `deprecated` and `deploy_time_switch`.
+Finish each one with `required`, `optional` (a `None` when unset) or
+`default(value)`.
 
-- **Encodings** (SPEC §5): lists are `Csv(separator)` (`a,b`), `JsonArray`
-  (`["a","b"]`) or `Indexed` (`NAME__0=a`, `NAME__1=b`, numbered from 0
-  with no gap, or the variable is `invalid_type`); durations are `Go` (`1m30s`), `Iso8601` (`PT90S`),
-  `Seconds` (`90`, `1.5`) or `Timespan` (`[d.]hh:mm:ss[.fff]`). The contract
-  records the encoding, and the platform renders values to match. The
-  parsers are also public: `duration.parse_iso8601`, `parse_seconds` and
-  `parse_timespan`.
+- **Your own types**: `map` transforms a finished variable's value, and
+  `try_map` does the same with a function that can reject it. Both run only
+  on a value that was read and passed its checks; a rejection is reported
+  as `invalid_type` with your message:
 
-- **Durations** use Go syntax (`1m30s`, `250ms`, `1.5h`), parsed by docuconf,
-  and are written to the contract in canonical form (`1h30m`).
+  ```gleam
+  pub fn database() -> docuconf.Spec(Uri) {
+    use database_url <- docuconf.env(
+      docuconf.url("DATABASE_URL", "Postgres connection string")
+      |> docuconf.required
+      |> docuconf.try_map(fn(s) {
+        uri.parse(s) |> result.replace_error("is not a parseable URI")
+      }),
+    )
+    docuconf.build(database_url)
+  }
+  ```
+
+  For a secret variable, the message is withheld if it contains any part
+  of the value.
+- **Durations** are `docuconf/duration.Duration` values everywhere in
+  code: `default(duration.seconds(30))`, `max_duration(duration.minutes(5))`,
+  `min_remaining(duration.hours(720))`. In the environment they use the
+  variable's encoding (SPEC §5): `Go` (`1m30s`), `Iso8601` (`PT90S`),
+  `Seconds` (`90`, `1.5`) or `Timespan` (`[d.]hh:mm:ss[.fff]`). A Go-style
+  value for an ISO 8601 variable is reported as `is not an ISO 8601
+  duration such as PT30S; it looks like a Go duration...`. Contracts carry
+  durations in canonical Go form (`1h30m`). For a `gleam_time` duration,
+  `gleam/time/duration.nanoseconds(duration.to_nanoseconds(d))`.
+- **Lists** are `Csv(separator)` (`a,b`), `JsonArray` (`["a","b"]`) or
+  `Indexed` (`NAME__0=a`, `NAME__1=b`, numbered from 0 with no gap, or the
+  variable is `invalid_type`). Items are never trimmed; a boot warning
+  names items with spaces around them.
 - **Patterns** are RE2 and match anywhere in the value; anchor them with
   `^` and `$`. Features RE2 lacks (lookaround, backreferences, atomic groups,
   possessive quantifiers) are declaration errors. Matching follows RE2 on
@@ -170,48 +382,141 @@ finished variable's value with `map` if you like.
   with `min_int`/`max_int` (or `item_min`/`item_max`) if the contract must
   not depend on the target.
 - **Item bounds**: `item_min` and `item_max` bound every item of an
-  `int_list` and are exported as `itemMin` and `itemMax`. An item outside
-  them is `out_of_range`:
+  `int_list`, exported as `itemMin` and `itemMax`:
 
   ```gleam
-  docuconf.int_list("SHARDS", "Shard ids this instance owns", separator: ",")
-  |> docuconf.item_min(0)
-  |> docuconf.item_max(1023)
-  |> docuconf.optional
+  pub fn shards() -> docuconf.Spec(Option(List(Int))) {
+    use shards <- docuconf.env(
+      docuconf.int_list("SHARDS", "Shard ids this instance owns", separator: ",")
+      |> docuconf.item_min(0)
+      |> docuconf.item_max(1023)
+      |> docuconf.optional,
+    )
+    docuconf.build(shards)
+  }
   ```
+- **Lengths** count characters, meaning Unicode code points, never bytes:
+  `日本` is 2 characters and `ZÜ01` is 4. `min_length` and `max_length`
+  bound a `string`; `max_length` also bounds a `url` as it is and a `json`
+  value as the app receives it, before parsing and whitespace included (a
+  `json` default is measured as compact JSON). `item_min_length` and
+  `item_max_length` bound each item of a string list after it is split, so
+  a separator never counts; they are exported as `itemMinLength` and
+  `itemMaxLength`, and an `item_min_length` above `item_max_length` is a
+  declaration error. A value out of bounds is `out_of_range`, and a secret
+  is reported by its length, never its value.
 - **Empty strings** are present values for `string` and unset for every
   other type. Values are never trimmed.
 - **`json` and config files** decode into your own type with a
   `gleam/dynamic/decode` decoder. Gleam cannot derive a JSON Schema from a
   type, so you attach one with `schema` / `file_schema` (built with
-  `docuconf/json`); a value the decoder rejects is `schema_mismatch`. The
-  `placeholder` is any value of the type. docuconf passes it along while it
-  walks the declaration to export it or to collect every error.
+  `docuconf/json`); a value the decoder rejects is `schema_mismatch`
+  (`does not decode: $.currency: expected String`).
+- **Splitting a declaration**: `include` declares every input of another
+  spec and binds a handle to its value; `map_spec` transforms a spec's
+  value.
+
+  ```gleam
+  pub fn with_cache() -> docuconf.Spec(#(Int, Cache)) {
+    use port <- docuconf.env(
+      docuconf.int("PORT", "HTTP listen port") |> docuconf.default(8080),
+    )
+    use cache <- docuconf.include(cache_spec())
+    use v <- docuconf.build
+    #(port(v), cache(v))
+  }
+  ```
 
 Declaration problems are reported together as `InvalidDeclaration` by
-`load`, `contract` and `check_declaration`. These cover names, description
-length, defaults against their own constraints, secrets with defaults,
-non-RE2 patterns, constraints on the wrong type and the file mount rules.
-`flag_warnings(spec)` lists names that look like feature flags (SPEC §10).
-Call it from a test or lint.
+`load_with`, `contract` and `check_declaration`, each naming the variable
+or file: names, description length, defaults against their own constraints
+(an enum default must be one of its values), secrets with defaults or
+examples, non-RE2 patterns, constraints on the wrong type and the file
+mount rules. `flag_warnings(spec)` lists names that look like feature flags
+(SPEC §10); call it from a test or lint.
+
+## Why `use` binds handles
+
+In earlier, unreleased versions, `use port <- docuconf.env(...)` bound the value
+itself, and the chain ended with `docuconf.succeed(Config(port:, ...))`.
+To list the inputs (for export, or to report every problem at once),
+docuconf ran that chain on placeholder values such as `""` and `0`. Two
+things went wrong: code in the chain or in a `map` crashed on a placeholder
+(`let assert Ok(u) = uri.parse("")`), and a variable declared only when
+another had some value was missing from the exported contract, which the
+platform then rejected at deploy.
+
+Now each `use` binds a handle and the values only exist inside `build`:
+
+```diff
+   use port <- docuconf.env(docuconf.int("PORT", "HTTP port") |> docuconf.default(8080))
+-  docuconf.succeed(Config(port:))
++  use v <- docuconf.build
++  Config(port: port(v))
+```
+
+The declaration is the same for every environment, so the contract always
+lists every input, and none of your code runs until the real values are
+loaded and checked. Other changes made at the same time: `secret` and
+`secret_file` give a `Secret(a)`; duration bounds take `Duration` values;
+`json`, `config_file` and `config_file_with` lost their `placeholder`
+argument; `contract_with` takes labelled arguments; and `write_contract`
+returns `WriteFailed` when it cannot write.
 
 ## Files
 
 | Builder | Contract type | Gleam value | Options |
 |---|---|---|---|
-| `config_file(name, desc, path:, decoder:, placeholder:)` | `config` (JSON) | your type | `file_schema` |
-| `config_file_with(..., format, parse, ...)` | `config` (YAML, TOML) | your type | `file_schema` |
+| `config_file(name, desc, path:, decoder:)` | `config` (JSON) | your type | `file_schema` |
+| `config_file_with(name, desc, path:, format:, parse:, decoder:)` | `config` (YAML, TOML) | your type | `file_schema` |
 | `tls(name, desc, path:)` | `tls` | `Tls(dir, cert_file, key_file, ca_file)` | `dns_names`, `key_algorithms`, `min_remaining`, `require_ca` |
 | `ca_bundle(name, desc, path:)` | `caBundle` | `CaBundle(path, certificates)` | `min_certificates` |
 | `keystore(name, desc, path:, format:, password_var:)` | `keystore` | path | |
 | `text(name, desc, path:)` | `text` | the content | `text_pattern`, `text_min_length`, `text_max_length` |
 | `binary(name, desc, path:)` | `binary` | path | |
 
-All take `path_env`, `max_size`, `file_group` and `secret_file`, and are
-finished with `file_required` or `file_optional`. `DOCUCONF_FILE_ROOT` (or
-`with_file_root`) is prefixed to every absolute path, including paths read
-from a `path_env` variable. TLS checks use `:public_key` on Erlang and
-`node:crypto` on JavaScript.
+All take `path_env`, `max_size`, `file_group` and `secret_file` (the value
+becomes a `Secret(a)`), and are finished with `file_required` or
+`file_optional`:
+
+```gleam
+pub fn files() -> docuconf.Spec(Files) {
+  use pricing <- docuconf.file(
+    docuconf.config_file(
+      "pricing",
+      "Pricing rules: currency and discount tiers",
+      path: "/etc/orders/pricing/pricing.json",
+      decoder: {
+        use currency <- decode.field("currency", decode.string)
+        decode.success(Pricing(currency:))
+      },
+    )
+    |> docuconf.file_schema(json.object([#("type", json.string("object"))]))
+    |> docuconf.file_required,
+  )
+  use tls <- docuconf.file(
+    docuconf.tls(
+      "serving-tls",
+      "Certificate the API serves HTTPS with",
+      path: "/etc/orders/tls",
+    )
+    |> docuconf.dns_names(["orders.internal"])
+    |> docuconf.min_remaining(duration.hours(720))
+    |> docuconf.file_required,
+  )
+  use license <- docuconf.file(
+    docuconf.text("license", "Licence key", path: "/etc/orders/license/key")
+    |> docuconf.secret_file
+    |> docuconf.file_required,
+  )
+  use v <- docuconf.build
+  Files(pricing: pricing(v), tls: tls(v), license: license(v))
+}
+```
+
+`DOCUCONF_FILE_ROOT` (or `with_file_root`) is prefixed to every absolute
+path, including paths read from a `path_env` variable. TLS checks use
+`:public_key` on Erlang and `node:crypto` on JavaScript.
 
 **Keystores** are opened with the password from `password_var` (an empty
 password when it is `None` or unset). Neither OTP nor Node.js reads PKCS#12
@@ -226,10 +531,19 @@ indefinite-length encodings, which are not supported.
 
 ## Loading
 
-`load(spec)` reads the process environment. `load_with(spec, options)`
-takes `options()` with `with_env(dict)` (tests), `with_file_root`,
-`at_time(unix_seconds)` (certificate checks in tests),
-`with_termination_log(path)` and `without_termination_log`.
+| Function | Does |
+|---|---|
+| `load_or_exit(spec)` | the config, or the report on stderr and exit status 1 |
+| `load(spec)` | `Result(a, Error)` from the process environment |
+| `load_with(spec, options)` | `Result(a, Error)` with options |
+| `warnings(spec, options)` | the boot warnings, without loading |
+
+`options()` takes `with_env(dict)` (tests: the process environment is then
+never read), `with_file_root`, `at_time(unix_seconds)` (certificate checks
+in tests), `with_termination_log(path)`, `without_termination_log` and
+`on_warning(fn(String) -> Nil)`. By default the report is written to
+`DOCUCONF_TERMINATION_LOG`, else `/dev/termination-log` when it exists, cut
+to 4000 bytes.
 
 ## Injected secrets
 
@@ -259,11 +573,11 @@ let assert Ok(contract_first.IntValue(port)) = dict.get(values, "PORT")
 ```
 
 `load` returns a `Dict(String, Value)`, with `Absent` for an unset optional
-variable, or the same `InvalidConfig` error as `load_with`.
-`contract_first.spec(json)` returns the declaration instead, for
-`load_with` or `contract`. File inputs are not supported (a contract with
-`files` is rejected), and `json` values are not checked against their JSON
-Schema.
+variable and `SecretValue` for a secret, or the same `InvalidConfig` error
+as `load_with`. `contract_first.spec(json)` returns the declaration
+instead, for `load_with` or `contract`. File inputs are not supported (a
+contract with `files` is rejected), and `json` values are not checked
+against their JSON Schema.
 
 ## Config-file overlays
 
@@ -313,8 +627,10 @@ gleam test                      # Erlang
 gleam test --target javascript  # Node.js
 ```
 
-The export test vets the generated contract with `cue vet -c` against the
-meta-schema from [docuconf-go](https://github.com/docuconf/docuconf-go)
+`test/readme_test.gleam` checks that every Gleam block in this README is
+part of `test/readme_snippets.gleam` or `examples/orders`, which CI
+compiles. The export test vets the generated contract with `cue vet -c`
+against the meta-schema from [docuconf-go](https://github.com/docuconf/docuconf-go)
 (`spec/cue`; set `DOCUCONF_SPEC_CUE`, or keep a sibling checkout). It is
 skipped when `cue` is missing, unless `DOCUCONF_REQUIRE_VET=1`. TLS tests
 generate certificates with `openssl`. Regenerate the golden file with
@@ -322,8 +638,8 @@ generate certificates with `openssl`. Regenerate the golden file with
 
 Where Hex is unreachable, `scripts/offline-test.sh` runs the tests against
 source checkouts of the dependencies (see the script). With wisp, mist and
-their dependencies checked out too, it also builds `examples/orders`,
-compares its exported contract and runs its `smoke.sh`.
+their dependencies checked out too, it also builds and tests
+`examples/orders`, compares its exported contract and runs its `smoke.sh`.
 
 ## Licence
 

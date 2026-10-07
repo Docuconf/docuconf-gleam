@@ -8,13 +8,8 @@ import gleam/int
 import gleam/list
 import gleam/option.{None, Some}
 import gleam/string
-import gleeunit
 import sample
 import support
-
-pub fn main() -> Nil {
-  gleeunit.main()
-}
 
 // ---- helpers ------------------------------------------------------------------
 
@@ -79,6 +74,7 @@ fn codes(result) -> List(#(String, String)) {
     Error(docuconf.InvalidDeclaration(ps)) -> [
       #("declaration", string.join(ps, "; ")),
     ]
+    Error(e) -> [#("error", docuconf.describe(e))]
   }
 }
 
@@ -189,9 +185,9 @@ pub fn export_options_test() {
   let assert Ok(cue) =
     docuconf.contract_with(
       sample.spec(),
-      "sample-gateway",
-      Some("gw"),
-      Some("1.2.3"),
+      name: "sample-gateway",
+      package: Some("gw"),
+      app_version: Some("1.2.3"),
     )
   let assert True = string.contains(cue, "\npackage gw\n")
   let assert True = string.contains(cue, "appVersion: \"1.2.3\"")
@@ -337,6 +333,171 @@ pub fn all_violations_together_test() {
     string.contains(text, "PORT [out_of_range]: \"70000\" is above max 65535")
 }
 
+// SPEC §4.3: maxLength on url and json values, itemMinLength and
+// itemMaxLength on string list items, all counted in Unicode code points.
+pub fn length_limits_test() {
+  let spec = {
+    use callback <- docuconf.env(
+      docuconf.url("CALLBACK", "Where to report each run")
+      |> docuconf.schemes(["https"])
+      |> docuconf.max_length(24)
+      |> docuconf.optional,
+    )
+    use limits <- docuconf.env(
+      docuconf.json(
+        "LIMITS",
+        "Run limits as a JSON object",
+        decoder: json.decoder(),
+        encode: fn(j) { j },
+      )
+      |> docuconf.max_length(16)
+      |> docuconf.optional,
+    )
+    use branches <- docuconf.env(
+      docuconf.string_list("BRANCHES", "Branch codes", separator: ",")
+      |> docuconf.item_min_length(2)
+      |> docuconf.item_max_length(4)
+      |> docuconf.optional,
+    )
+    use indexed <- docuconf.env(
+      docuconf.string_list_with(
+        "BRANCHES_IDX",
+        "Branch codes, one per variable",
+        encoding: docuconf.Indexed,
+      )
+      |> docuconf.item_max_length(4)
+      |> docuconf.optional,
+    )
+    use db <- docuconf.env(
+      docuconf.url("DB_URL", "Database connection string")
+      |> docuconf.max_length(30)
+      |> docuconf.secret
+      |> docuconf.optional,
+    )
+    use name <- docuconf.env(
+      docuconf.string("NAME", "Display name")
+      |> docuconf.max_length(2)
+      |> docuconf.optional,
+    )
+    use v <- docuconf.build
+    #(callback(v), limits(v), branches(v), indexed(v), db(v), name(v))
+  }
+  let load = fn(env) {
+    docuconf.load_with(
+      spec,
+      docuconf.options()
+        |> docuconf.with_env(dict.from_list(env))
+        |> docuconf.without_termination_log,
+    )
+  }
+  // Multi-byte values: code points, not bytes or UTF-16 units.
+  let assert Ok(#(
+    Some(_),
+    Some(_),
+    Some(["ZÜ01", "日本"]),
+    Some(["😀😀"]),
+    _,
+    Some("日本"),
+  )) =
+    load([
+      #("CALLBACK", "https://例え.jp/日本語の道/一二三四"),
+      #("LIMITS", "{\"n\":\"日本語の道路xy\"}"),
+      #("BRANCHES", "ZÜ01,日本"),
+      #("BRANCHES_IDX__0", "😀😀"),
+      #("NAME", "日本"),
+    ])
+  let assert [#("NAME", "out_of_range")] = codes(load([#("NAME", "日本語")]))
+  let assert [#("CALLBACK", "out_of_range")] =
+    codes(load([#("CALLBACK", "https://a.example/runs/42")]))
+  let assert [#("CALLBACK", "invalid_scheme")] =
+    codes(load([#("CALLBACK", "http://a")]))
+  // json is measured as received, whitespace included.
+  let assert [#("LIMITS", "out_of_range")] =
+    codes(load([#("LIMITS", "{ \"max\": 123456 }")]))
+  let assert [#("LIMITS", "invalid_type")] = codes(load([#("LIMITS", "{")]))
+  let assert [#("BRANCHES", "out_of_range")] =
+    codes(load([#("BRANCHES", "BE,ZÜRICH")]))
+  let assert [#("BRANCHES", "out_of_range")] =
+    codes(load([#("BRANCHES", "BE,B")]))
+  let assert [#("BRANCHES_IDX", "out_of_range")] =
+    codes(load([#("BRANCHES_IDX__0", "BE"), #("BRANCHES_IDX__1", "GENEVA")]))
+  // A too-long secret reports its length, never its value.
+  let assert Error(docuconf.InvalidConfig([v]) as e) =
+    load([#("DB_URL", "postgres://app:s3cr3t@db:5432/app")])
+  let assert docuconf.Violation("DB_URL", _, docuconf.OutOfRange, _) = v
+  let assert True = string.contains(v.message, "33 characters")
+  let assert False = string.contains(docuconf.describe(e), "s3cr3t")
+  // Export.
+  let assert Ok(cue) = docuconf.contract(spec, name: "lengths")
+  let assert True = string.contains(cue, "\t\t\tmaxLength: 24\n")
+  let assert True = string.contains(cue, "\t\t\tmaxLength: 16\n")
+  let assert True =
+    string.contains(cue, "\t\t\titemMinLength: 2\n\t\t\titemMaxLength: 4\n")
+  cue_vet(cue)
+}
+
+pub fn length_limit_declaration_errors_test() {
+  let bad = {
+    use _ <- docuconf.env(
+      docuconf.string_list("A", "Some codes", separator: ",")
+      |> docuconf.item_min_length(5)
+      |> docuconf.item_max_length(4)
+      |> docuconf.optional,
+    )
+    use _ <- docuconf.env(
+      docuconf.string_list("B", "Some codes", separator: ",")
+      |> docuconf.item_max_length(2)
+      |> docuconf.default(["ok", "ZÜ01"]),
+    )
+    use _ <- docuconf.env(
+      docuconf.url("C", "Some endpoint")
+      |> docuconf.max_length(10)
+      |> docuconf.default("https://example.com"),
+    )
+    use _ <- docuconf.env(
+      docuconf.json("D", "Some limits", decoder: json.decoder(), encode: fn(j) {
+        j
+      })
+      |> docuconf.max_length(8)
+      |> docuconf.default(json.object([#("n", json.string("日本語の道路"))])),
+    )
+    use _ <- docuconf.env(
+      docuconf.int("E", "Some count")
+      |> docuconf.max_length(3)
+      |> docuconf.optional,
+    )
+    use _ <- docuconf.env(
+      docuconf.json("F", "Some limits", decoder: json.decoder(), encode: fn(j) {
+        j
+      })
+      |> docuconf.max_length(14)
+      |> docuconf.default(json.object([#("n", json.string("日本語の道"))])),
+    )
+    docuconf.succeed(Nil)
+  }
+  let text = string.join(docuconf.check_declaration(bad), "\n")
+  let expect = fn(s) {
+    case string.contains(text, s) {
+      True -> Nil
+      False -> panic as { "missing problem: " <> s <> "\n" <> text }
+    }
+  }
+  expect("variable A: item_min_length 5 is greater than item_max_length 4")
+  expect("variable B: default does not satisfy")
+  expect("variable C: default does not satisfy")
+  expect("variable D: default does not satisfy")
+  expect("variable E: max_length does not apply to a int variable")
+  // {"n":"日本語の道"} is 14 characters.
+  let assert False = string.contains(text, "variable F:")
+  // Contract-first: item lengths only apply to string lists.
+  let assert Error(docuconf.InvalidDeclaration([p])) =
+    contract_first.load(
+      "{\"vars\": {\"N\": {\"type\": \"list\", \"items\": \"int\", \"itemMaxLength\": 4, \"description\": \"Some list\"}}}",
+      docuconf.options(),
+    )
+  let assert True = string.contains(p, "only apply to string lists")
+}
+
 // SPEC §4.3, §5: itemMin and itemMax bound each item of an int list.
 pub fn item_bounds_test() {
   let spec = {
@@ -350,7 +511,7 @@ pub fn item_bounds_test() {
       |> docuconf.item_max(1023)
       |> docuconf.optional,
     )
-    docuconf.succeed(shards)
+    docuconf.build(shards)
   }
   let load = fn(v) {
     docuconf.load_with(
@@ -379,7 +540,7 @@ pub fn item_bounds_test() {
       |> docuconf.item_max(3)
       |> docuconf.default([1, 4]),
     )
-    docuconf.succeed(shards)
+    docuconf.build(shards)
   }
   let assert [_] = docuconf.check_declaration(bad_default)
 }
@@ -499,11 +660,6 @@ pub fn declaration_problems_test() {
       |> docuconf.default(3),
     )
     use _ <- docuconf.env(
-      docuconf.string("TOKEN", "API token")
-      |> docuconf.secret
-      |> docuconf.default("x"),
-    )
-    use _ <- docuconf.env(
       docuconf.string("HOST", "Host name")
       |> docuconf.pattern("a(?=b)")
       |> docuconf.optional,
@@ -554,7 +710,6 @@ pub fn declaration_problems_test() {
   expect(
     "variable SIZE: default does not satisfy the variable's constraints (out_of_range",
   )
-  expect("variable TOKEN: a secret must not have a default")
   expect("variable HOST: pattern \"a(?=b)\" uses lookahead")
   expect("variable API: min_length does not apply to a url variable")
   expect("file b: path_env HOST must not also be declared as a variable")
@@ -812,7 +967,7 @@ pub fn keystore_empty_password_test() {
       |> docuconf.secret
       |> docuconf.optional,
     )
-    docuconf.succeed(ks)
+    docuconf.build(ks)
   }
   let opts = fn(env) {
     docuconf.options()
@@ -853,7 +1008,7 @@ pub fn keystore_jks_test() {
           |> docuconf.secret
           |> docuconf.optional,
         )
-        docuconf.succeed(ks)
+        docuconf.build(ks)
       }
       list.each(["JKS", "JCEKS"], fn(kind) {
         let out = "/ks/" <> string.lowercase(kind) <> "/store.jks"
@@ -904,7 +1059,7 @@ pub fn int64_range_test() {
     use n <- docuconf.env(
       docuconf.int("N", "A big number") |> docuconf.required,
     )
-    docuconf.succeed(n)
+    docuconf.build(n)
   }
   let load = fn(v) {
     docuconf.load_with(
@@ -945,7 +1100,8 @@ pub fn javascript_int_range_test() {
       docuconf.int_list("NS", "Big numbers", separator: ",")
       |> docuconf.optional,
     )
-    docuconf.succeed(#(n, ns))
+    use v <- docuconf.build
+    #(n(v), ns(v))
   }
   let load = fn(spec, env) {
     docuconf.load_with(
@@ -962,7 +1118,7 @@ pub fn javascript_int_range_test() {
       |> docuconf.min_int(1)
       |> docuconf.optional,
     )
-    docuconf.succeed(n)
+    docuconf.build(n)
   }
   let assert Ok(narrowed_cue) = docuconf.contract(narrowed, name: "ints")
   let wide = {
@@ -972,7 +1128,7 @@ pub fn javascript_int_range_test() {
       |> docuconf.max_int(two_53)
       |> docuconf.optional,
     )
-    docuconf.succeed(n)
+    docuconf.build(n)
   }
   case support.target() {
     "javascript" -> {
@@ -1016,7 +1172,7 @@ pub fn javascript_int_range_test() {
           |> docuconf.item_max(two_53)
           |> docuconf.optional,
         )
-        docuconf.succeed(ns)
+        docuconf.build(ns)
       }
       let assert [_, _] = docuconf.check_declaration(wide_items)
       let defaulted = {
@@ -1024,7 +1180,7 @@ pub fn javascript_int_range_test() {
           docuconf.int("N", "A big number")
           |> docuconf.default(two_53),
         )
-        docuconf.succeed(n)
+        docuconf.build(n)
       }
       let assert [_] = docuconf.check_declaration(defaulted)
       Nil
@@ -1053,7 +1209,7 @@ fn matches(pattern: String, value: String) -> Bool {
       |> docuconf.pattern(pattern)
       |> docuconf.required,
     )
-    docuconf.succeed(v)
+    docuconf.build(v)
   }
   let opts =
     docuconf.options()
@@ -1062,7 +1218,7 @@ fn matches(pattern: String, value: String) -> Bool {
   case docuconf.load_with(spec, opts) {
     Ok(_) -> True
     Error(docuconf.InvalidConfig(_)) -> False
-    Error(docuconf.InvalidDeclaration(ps)) -> panic as string.join(ps, "; ")
+    Error(e) -> panic as docuconf.describe(e)
   }
 }
 
@@ -1101,7 +1257,8 @@ pub fn indexed_list_gap_test() {
       )
       |> docuconf.optional,
     )
-    docuconf.succeed(#(ports, hosts))
+    use v <- docuconf.build
+    #(ports(v), hosts(v))
   }
   let load = fn(env) {
     docuconf.options()

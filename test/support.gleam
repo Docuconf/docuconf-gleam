@@ -17,6 +17,16 @@ pub fn target() -> String
 @external(javascript, "./docuconf_test_ffi.mjs", "read_file")
 pub fn read_file(path: String) -> Result(String, Nil)
 
+/// Keeps a string, for a callback to report what it saw.
+@external(erlang, "docuconf_test_ffi", "remember")
+@external(javascript, "./docuconf_test_ffi.mjs", "remember")
+pub fn remember(s: String) -> Nil
+
+/// The strings kept with `remember`, oldest first; clears them.
+@external(erlang, "docuconf_test_ffi", "recall")
+@external(javascript, "./docuconf_test_ffi.mjs", "recall")
+pub fn recall() -> List(String)
+
 /// Runs a command that must succeed; returns its output.
 pub fn sh(cmd: String) -> String {
   let #(code, out) = shell(cmd)

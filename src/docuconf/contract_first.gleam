@@ -20,7 +20,7 @@
 //// Not covered: file inputs (a contract with `files` is rejected), and
 //// `json` values are not checked against their JSON Schema.
 
-import docuconf.{type Spec, type Var, type VarBuilder}
+import docuconf.{type Secret, type Spec, type Values, type Var, type VarBuilder}
 import docuconf/duration.{type Duration}
 import docuconf/json.{type Json}
 import gleam/dict.{type Dict}
@@ -42,6 +42,9 @@ pub type Value {
   /// A `list` of `StringValue` or `IntValue` items.
   ListValue(List(Value))
   JsonValue(Json)
+  /// The value of a `secret: true` variable. It prints redacted; read it
+  /// with `docuconf.reveal`.
+  SecretValue(Secret(Value))
 }
 
 /// The value as JSON: `null` when absent, a duration in canonical Go form.
@@ -55,6 +58,7 @@ pub fn to_json(value: Value) -> Json {
     DurationValue(d) -> json.String(duration.to_string(d))
     ListValue(items) -> json.Array(list.map(items, to_json))
     JsonValue(j) -> j
+    SecretValue(s) -> to_json(docuconf.reveal(s))
   }
 }
 
@@ -107,7 +111,7 @@ pub fn spec(
         }
       })
     case problems {
-      [] -> Ok(build(list.reverse(declared), dict.new()))
+      [] -> Ok(build(list.reverse(declared), []))
       _ -> Error(list.reverse(problems))
     }
   }
@@ -116,13 +120,16 @@ pub fn spec(
 
 fn build(
   vars: List(#(String, Var(Value))),
-  acc: Dict(String, Value),
+  handles: List(#(String, fn(Values) -> Value)),
 ) -> Spec(Dict(String, Value)) {
   case vars {
-    [] -> docuconf.succeed(acc)
+    [] -> {
+      use v <- docuconf.build
+      dict.from_list(list.map(handles, fn(h) { #(h.0, h.1(v)) }))
+    }
     [#(name, var), ..rest] -> {
       use value <- docuconf.env(var)
-      build(rest, dict.insert(acc, name, value))
+      build(rest, [#(name, value), ..handles])
     }
   }
 }
@@ -164,13 +171,14 @@ fn declare(name: String, def: Json) -> Result(Var(Value), String) {
     "duration" -> {
       use encoding <- result.try(duration_encoding(def))
       let b = docuconf.duration_with(name, description, encoding:)
-      use b <- result.try(apply(b, def, "min", text, docuconf.min_duration))
-      use b <- result.try(apply(b, def, "max", text, docuconf.max_duration))
+      use b <- result.try(apply(b, def, "min", span, docuconf.min_duration))
+      use b <- result.try(apply(b, def, "max", span, docuconf.max_duration))
       finish(b, def, DurationValue, duration_of)
     }
     "url" -> {
       let b = docuconf.url(name, description)
       use b <- result.try(apply(b, def, "schemes", strings, docuconf.schemes))
+      use b <- result.try(apply(b, def, "maxLength", whole, docuconf.max_length))
       finish(b, def, StringValue, string_of)
     }
     "enum" -> {
@@ -187,8 +195,11 @@ fn declare(name: String, def: Json) -> Result(Var(Value), String) {
     "list" -> declare_list(name, description, def)
     "json" -> {
       let b =
-        docuconf.json(name, description, json.decoder(), json.Null, fn(j) { j })
+        docuconf.json(name, description, decoder: json.decoder(), encode: fn(j) {
+          j
+        })
       use b <- result.try(apply(b, def, "schema", any, docuconf.schema))
+      use b <- result.try(apply(b, def, "maxLength", whole, docuconf.max_length))
       finish(b, def, JsonValue, Ok)
     }
     other -> Error("unknown type " <> json.quote(other))
@@ -212,6 +223,20 @@ fn declare_list(
         bounds(docuconf.string_list_with(name, description, encoding:)),
       )
       use b <- result.try(no_item_bounds(b, def))
+      use b <- result.try(apply(
+        b,
+        def,
+        "itemMinLength",
+        whole,
+        docuconf.item_min_length,
+      ))
+      use b <- result.try(apply(
+        b,
+        def,
+        "itemMaxLength",
+        whole,
+        docuconf.item_max_length,
+      ))
       finish(b, def, fn(l) { ListValue(list.map(l, StringValue)) }, fn(j) {
         list_of(j, string_of)
       })
@@ -220,6 +245,7 @@ fn declare_list(
       use b <- result.try(
         bounds(docuconf.int_list_with(name, description, encoding:)),
       )
+      use b <- result.try(no_item_lengths(b, def))
       use b <- result.try(apply(b, def, "itemMin", whole, docuconf.item_min))
       use b <- result.try(apply(b, def, "itemMax", whole, docuconf.item_max))
       finish(b, def, fn(l) { ListValue(list.map(l, IntValue)) }, fn(j) {
@@ -234,6 +260,19 @@ fn no_item_bounds(b: VarBuilder(a), def: Def) -> Result(VarBuilder(a), String) {
   case list.key_find(def, "itemMin"), list.key_find(def, "itemMax") {
     Error(Nil), Error(Nil) -> Ok(b)
     _, _ -> Error("itemMin and itemMax only apply to int lists")
+  }
+}
+
+fn no_item_lengths(
+  b: VarBuilder(a),
+  def: Def,
+) -> Result(VarBuilder(a), String) {
+  case
+    list.key_find(def, "itemMinLength"),
+    list.key_find(def, "itemMaxLength")
+  {
+    Error(Nil), Error(Nil) -> Ok(b)
+    _, _ -> Error("itemMinLength and itemMaxLength only apply to string lists")
   }
 }
 
@@ -270,11 +309,26 @@ fn finish(
   default_of: fn(Json) -> Result(a, String),
 ) -> Result(Var(Value), String) {
   use secret <- result.try(flag(def, "secret"))
-  use required <- result.try(flag(def, "required"))
-  let b = case secret {
-    True -> docuconf.secret(b)
-    False -> b
+  case secret, list.key_find(def, "default") {
+    True, Ok(_) -> Error("a secret must not have a default")
+    True, Error(Nil) ->
+      finish_var(
+        docuconf.secret(b),
+        def,
+        fn(s) { SecretValue(docuconf.map_secret(s, wrap)) },
+        fn(_) { Error("a secret must not have a default") },
+      )
+    False, _ -> finish_var(b, def, wrap, default_of)
   }
+}
+
+fn finish_var(
+  b: VarBuilder(a),
+  def: Def,
+  wrap: fn(a) -> Value,
+  default_of: fn(Json) -> Result(a, String),
+) -> Result(Var(Value), String) {
+  use required <- result.try(flag(def, "required"))
   case required, list.key_find(def, "default") {
     True, _ -> Ok(docuconf.required(b) |> docuconf.map(wrap))
     False, Ok(j) -> {
@@ -341,6 +395,10 @@ fn field(
 
 fn text(def: Def, key: String) -> Result(option.Option(String), String) {
   field(def, key, string_of)
+}
+
+fn span(def: Def, key: String) -> Result(option.Option(Duration), String) {
+  field(def, key, duration_of)
 }
 
 fn whole(def: Def, key: String) -> Result(option.Option(Int), String) {

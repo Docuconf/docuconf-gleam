@@ -13,18 +13,33 @@ pub opaque type Duration {
   Duration(nanoseconds: Int)
 }
 
+/// `n` nanoseconds.
 pub fn nanoseconds(n: Int) -> Duration {
   Duration(n)
 }
 
+/// `n` milliseconds.
 pub fn milliseconds(n: Int) -> Duration {
   Duration(n * 1_000_000)
 }
 
+/// `n` seconds.
 pub fn seconds(n: Int) -> Duration {
   Duration(n * 1_000_000_000)
 }
 
+/// `n` minutes.
+pub fn minutes(n: Int) -> Duration {
+  Duration(n * 60_000_000_000)
+}
+
+/// `n` hours.
+pub fn hours(n: Int) -> Duration {
+  Duration(n * 3_600_000_000_000)
+}
+
+/// Whole nanoseconds. To get a `gleam_time` duration:
+/// `gleam/time/duration.nanoseconds(to_nanoseconds(d))`.
 pub fn to_nanoseconds(d: Duration) -> Int {
   d.nanoseconds
 }
@@ -39,6 +54,7 @@ pub fn to_seconds(d: Duration) -> Int {
   d.nanoseconds / 1_000_000_000
 }
 
+/// Compares two durations.
 pub fn compare(a: Duration, b: Duration) -> order.Order {
   int.compare(a.nanoseconds, b.nanoseconds)
 }

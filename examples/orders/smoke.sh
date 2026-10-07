@@ -35,6 +35,8 @@ done
 config=$(curl -fsS "http://127.0.0.1:$port/config") || fail "GET /config failed"
 case $config in *smoke-s3cret*) fail "GET /config leaks the secret: $config" ;; esac
 case $config in *'"database_url":"***"'*) ;; *) fail "GET /config does not redact database_url: $config" ;; esac
+grep -q 'config: Config(' "$log" || fail "the startup log does not show the config"
+grep -q smoke-s3cret "$log" && fail "the startup log leaks the secret"
 echo "smoke: GET /healthz -> $health"
 echo "smoke: GET /config -> $config"
 kill "$pid"
@@ -47,6 +49,8 @@ env -u DATABASE_URL PORT=0 "$app" run >"$log" 2>&1 || status=$?
 [ "$status" -ne 0 ] || fail "the service started with an invalid environment"
 grep -q missing_required "$log" || fail "no missing_required in the startup output"
 grep -q out_of_range "$log" || fail "no out_of_range in the startup output"
+grep -q '^docuconf: 2 configuration problems:$' "$log" || fail "no problem count in the startup output"
+grep -qi stacktrace "$log" && fail "the startup output has a stack trace"
 echo "smoke: invalid environment -> exit $status"
 sed 's/^/  /' "$log"
 echo "smoke: ok"
