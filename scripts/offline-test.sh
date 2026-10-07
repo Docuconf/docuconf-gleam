@@ -73,7 +73,9 @@ if [ -d "$work/vendor/wisp" ] && [ -d "$work/examples/orders" ]; then
     vet=$(mktemp -d "$work/vet.XXXX")
     cp -r "$DOCUCONF_SPEC_CUE/cue.mod" "$DOCUCONF_SPEC_CUE/contract" "$vet/"
     mkdir "$vet/orders" && cp contract.cue "$vet/orders/"
-    (cd "$vet" && cue vet -c ./orders) && echo "orders: cue vet -c ok"
+    # Not `a && b`: set -e ignores a failure on the left of &&.
+    (cd "$vet" && cue vet -c ./orders)
+    echo "orders: cue vet -c ok"
   fi
   ./smoke.sh
 fi
