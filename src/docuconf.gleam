@@ -795,12 +795,14 @@ fn only(b: VarBuilder(a), types: List(String), what: String) -> VarBuilder(a) {
   }
 }
 
-/// Minimum length in characters (string variables).
+/// Minimum length in characters (string variables). Lengths count
+/// Unicode code points, never bytes: `日本` is 2 characters.
 pub fn min_length(b: VarBuilder(String), n: Int) -> VarBuilder(String) {
   only(b, ["string"], "min_length")
+  |> not_negative(n, "min_length")
   |> set_field("minLength", json.Int(n))
   |> add_check(fn(s) {
-    let len = string.length(s)
+    let len = char_count(s)
     case len < n {
       True ->
         Error(#(
@@ -815,24 +817,138 @@ pub fn min_length(b: VarBuilder(String), n: Int) -> VarBuilder(String) {
   })
 }
 
-/// Maximum length in characters (string variables).
-pub fn max_length(b: VarBuilder(String), n: Int) -> VarBuilder(String) {
-  only(b, ["string"], "max_length")
-  |> set_field("maxLength", json.Int(n))
-  |> add_check(fn(s) {
-    let len = string.length(s)
-    case len > n {
-      True ->
-        Error(#(
-          OutOfRange,
-          "is "
-            <> int.to_string(len)
-            <> " characters, longer than maxLength "
-            <> int.to_string(n),
-        ))
-      False -> Ok(Nil)
+/// Maximum length in characters (Unicode code points), exported as
+/// `maxLength`, for `string`, `url` and `json` variables. A longer value is
+/// `out_of_range`; for a secret the message gives the length, never the
+/// value.
+///
+/// A `json` value is measured as the app receives it, before it is parsed,
+/// whitespace included; its `default` is measured as compact JSON, as the
+/// platform renders it.
+pub fn max_length(b: VarBuilder(a), n: Int) -> VarBuilder(a) {
+  let b =
+    only(b, ["string", "url", "json"], "max_length")
+    |> not_negative(n, "max_length")
+    |> set_field("maxLength", json.Int(n))
+  case b.meta.type_ {
+    "json" -> {
+      let parse = b.parse
+      VarBuilder(..b, parse: fn(s) {
+        case parse(s) {
+          Ok(v) ->
+            case too_long(s, n, " characters of JSON") {
+              Ok(Nil) -> Ok(v)
+              Error(e) -> Error(e)
+            }
+          e -> e
+        }
+      })
     }
+    _ -> {
+      let encode = b.encode
+      add_check(b, fn(v) {
+        case encode(v) {
+          json.String(s) -> too_long(s, n, " characters")
+          _ -> Ok(Nil)
+        }
+      })
+    }
+  }
+}
+
+fn too_long(s: String, n: Int, unit: String) -> Result(Nil, Problem) {
+  let len = char_count(s)
+  case len > n {
+    True ->
+      Error(#(
+        OutOfRange,
+        "is "
+          <> int.to_string(len)
+          <> unit
+          <> ", longer than maxLength "
+          <> int.to_string(n),
+      ))
+    False -> Ok(Nil)
+  }
+}
+
+// The length of a string in characters: Unicode code points, as SPEC §4.3
+// counts them (not graphemes, bytes or UTF-16 units).
+fn char_count(s: String) -> Int {
+  list.length(string.to_utf_codepoints(s))
+}
+
+fn not_negative(b: VarBuilder(a), n: Int, what: String) -> VarBuilder(a) {
+  case n < 0 {
+    True -> add_problem(b, what <> " must not be negative")
+    False -> b
+  }
+}
+
+/// The shortest each item of a string list may be, in characters (Unicode
+/// code points), exported as `itemMinLength`. A shorter item is
+/// `out_of_range`. Items are measured after the list is split, so a `csv`
+/// separator never counts.
+pub fn item_min_length(
+  b: VarBuilder(List(String)),
+  n: Int,
+) -> VarBuilder(List(String)) {
+  only(b, ["list"], "item_min_length")
+  |> not_negative(n, "item_min_length")
+  |> set_field("itemMinLength", json.Int(n))
+  |> item_lengths_in_order
+  |> add_check(fn(l) {
+    each_item(l, fn(s) {
+      let len = char_count(s)
+      bound(
+        len < n,
+        int.to_string(len)
+          <> " characters, shorter than itemMinLength "
+          <> int.to_string(n),
+      )
+    })
   })
+}
+
+/// The longest each item of a string list may be, in characters (Unicode
+/// code points), exported as `itemMaxLength`. A longer item is
+/// `out_of_range`.
+pub fn item_max_length(
+  b: VarBuilder(List(String)),
+  n: Int,
+) -> VarBuilder(List(String)) {
+  only(b, ["list"], "item_max_length")
+  |> not_negative(n, "item_max_length")
+  |> set_field("itemMaxLength", json.Int(n))
+  |> item_lengths_in_order
+  |> add_check(fn(l) {
+    each_item(l, fn(s) {
+      let len = char_count(s)
+      bound(
+        len > n,
+        int.to_string(len)
+          <> " characters, longer than itemMaxLength "
+          <> int.to_string(n),
+      )
+    })
+  })
+}
+
+fn item_lengths_in_order(b: VarBuilder(a)) -> VarBuilder(a) {
+  case
+    list.key_find(b.meta.fields, "itemMinLength"),
+    list.key_find(b.meta.fields, "itemMaxLength")
+  {
+    Ok(json.Int(lo)), Ok(json.Int(hi)) if lo > hi ->
+      add_problem(
+        b,
+        "item_min_length "
+          <> int.to_string(lo)
+          <> " is greater than item_max_length "
+          <> int.to_string(hi),
+      )
+    _, _ -> b
+  }
 }
 
 /// An RE2 pattern the value must match somewhere; anchor it with `^`/`$`.
@@ -1124,6 +1240,22 @@ pub fn default(b: VarBuilder(a), value: a) -> Var(a) {
       <> msg
       <> ")",
     ]
+  }
+  // A json default is measured as the compact JSON the platform renders.
+  let problems = case b.meta.type_, list.key_find(b.meta.fields, "maxLength") {
+    "json", Ok(json.Int(n)) ->
+      case too_long(json.to_string(b.encode(value)), n, " characters of JSON") {
+        Ok(Nil) -> problems
+        Error(#(code, msg)) ->
+          list.append(problems, [
+            "default does not satisfy the variable's constraints ("
+            <> code_to_string(code)
+            <> ": "
+            <> msg
+            <> ")",
+          ])
+      }
+    _, _ -> problems
   }
   Var(
     meta: VarMeta(
@@ -1626,7 +1758,7 @@ pub fn text(
 ) -> FileBuilder(String) {
   file_builder(name, "text", description, path, fn(path, opts, _ctx) {
     use content <- read_text(path)
-    let len = string.length(content)
+    let len = char_count(content)
     let problems =
       list.flatten([
         case opts.min_length {
