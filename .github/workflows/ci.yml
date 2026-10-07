@@ -84,8 +84,10 @@ jobs:
         run: go install cuelang.org/go/cmd/cue@v0.17.1
 
       - run: gleam deps download
-      - run: gleam format --check src
+      - run: gleam format --check src dev test
       - run: gleam build --warnings-as-errors
+      # Config tests, and check_contract against the committed contract.cue.
+      - run: gleam test
 
       - name: Re-export the contract and compare
         run: |
