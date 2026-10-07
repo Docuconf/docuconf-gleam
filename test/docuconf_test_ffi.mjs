@@ -1,4 +1,6 @@
 import { execSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { Ok, Error } from "./gleam.mjs";
 
 export function shell(cmd) {
   try {
@@ -11,4 +13,12 @@ export function shell(cmd) {
 
 export function target() {
   return "javascript";
+}
+
+export function read_file(path) {
+  try {
+    return new Ok(readFileSync(path, "utf8"));
+  } catch {
+    return new Error(undefined);
+  }
 }

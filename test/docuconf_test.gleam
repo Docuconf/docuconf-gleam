@@ -1,5 +1,7 @@
 import docuconf
+import docuconf/contract_first
 import docuconf/duration
+import docuconf/json
 import envoy
 import gleam/dict
 import gleam/int
@@ -114,6 +116,58 @@ pub fn duration_canonical_test() {
   let assert "0s" = canon("0")
 }
 
+// SPEC §5: the iso8601, seconds and timespan wire encodings.
+pub fn duration_encodings_test() {
+  let canon = fn(parse: fn(String) -> Result(duration.Duration, Nil), s) {
+    case parse(s) {
+      Ok(d) -> Ok(duration.to_string(d))
+      Error(Nil) -> Error(Nil)
+    }
+  }
+  let iso = canon(duration.parse_iso8601, _)
+  let assert Ok("1m30s") = iso("PT90S")
+  let assert Ok("1s500ms") = iso("PT1.5S")
+  let assert Ok("1s500ms") = iso("PT1,5S")
+  let assert Ok("26h") = iso("P1DT2H")
+  let assert Ok("24h") = iso("P1D")
+  let assert Ok("1h30m") = iso("PT1H30M")
+  let assert Ok("0s") = iso("PT0S")
+  list.each(
+    ["", "P", "PT", "P1DT", "PT1M2H", "PT1S1S", "P1Y", "P1W", "1m30s", "PT.5S"],
+    fn(bad) {
+      let assert Error(Nil) = duration.parse_iso8601(bad)
+    },
+  )
+  let secs = canon(duration.parse_seconds, _)
+  let assert Ok("1m30s") = secs("90")
+  let assert Ok("250ms") = secs("0.25")
+  let assert Ok("0s") = secs("0")
+  list.each(["", "90s", "-1", ".5", "1.", "1e3", " 1"], fn(bad) {
+    let assert Error(Nil) = duration.parse_seconds(bad)
+  })
+  let span = canon(duration.parse_timespan, _)
+  let assert Ok("1m30s") = span("00:01:30")
+  let assert Ok("26h3m4s500ms") = span("1.02:03:04.5")
+  let assert Ok("2h") = span("2:00:00")
+  let assert Ok("1s1ms") = span("00:00:01.0010000")
+  list.each(
+    [
+      "",
+      "1m30s",
+      "24:00:00",
+      "00:60:00",
+      "00:00:60",
+      "0:1:30",
+      "00:01:30.",
+      ".01:00:00",
+      "00:00:00.12345678",
+    ],
+    fn(bad) {
+      let assert Error(Nil) = duration.parse_timespan(bad)
+    },
+  )
+}
+
 // ---- export ---------------------------------------------------------------------
 
 pub fn export_golden_test() {
@@ -149,6 +203,12 @@ pub fn export_options_test() {
 /// else a sibling checkout). Skipped when cue or the spec is absent, unless
 /// DOCUCONF_REQUIRE_VET=1.
 pub fn export_cue_vet_test() {
+  let assert Ok(contract) =
+    docuconf.contract(sample.spec(), name: "sample-gateway")
+  cue_vet(contract)
+}
+
+fn cue_vet(contract: String) -> Nil {
   let spec_dir = case envoy.get("DOCUCONF_SPEC_CUE") {
     Ok(d) -> d
     Error(Nil) -> "../docuconf-go/spec/cue"
@@ -164,8 +224,6 @@ pub fn export_cue_vet_test() {
   let spec_ok = support.shell("test -d '" <> spec_dir <> "/contract'").0 == 0
   case cue_bin, spec_ok {
     Some(cue), True -> {
-      let assert Ok(contract) =
-        docuconf.contract(sample.spec(), name: "sample-gateway")
       let dir = support.temp_dir()
       let _ =
         support.sh(
@@ -182,7 +240,7 @@ pub fn export_cue_vet_test() {
         support.shell("cd " <> dir <> " && " <> cue <> " vet -c ./svc 2>&1")
       case code {
         0 -> Nil
-        _ -> panic as { "cue vet failed:\n" <> out }
+        _ -> panic as { "cue vet failed:\n" <> out <> "\n" <> contract }
       }
     }
     _, _ ->
@@ -279,11 +337,58 @@ pub fn all_violations_together_test() {
     string.contains(text, "PORT [out_of_range]: \"70000\" is above max 65535")
 }
 
+// SPEC §4.3, §5: itemMin and itemMax bound each item of an int list.
+pub fn item_bounds_test() {
+  let spec = {
+    use shards <- docuconf.env(
+      docuconf.int_list(
+        "SHARDS",
+        "Shard ids this instance owns",
+        separator: ",",
+      )
+      |> docuconf.item_min(0)
+      |> docuconf.item_max(1023)
+      |> docuconf.optional,
+    )
+    docuconf.succeed(shards)
+  }
+  let load = fn(v) {
+    docuconf.load_with(
+      spec,
+      docuconf.options()
+        |> docuconf.with_env(dict.from_list([#("SHARDS", v)]))
+        |> docuconf.without_termination_log,
+    )
+  }
+  let assert Ok(Some([0, 7, 1023])) = load("0,7,1023")
+  let assert [#("SHARDS", "out_of_range")] = codes(load("3,-1"))
+  let assert [#("SHARDS", "out_of_range")] = codes(load("1024"))
+  let assert [#("SHARDS", "invalid_type")] = codes(load("1,x"))
+  let assert Ok(cue) = docuconf.contract(spec, name: "shards")
+  let assert True =
+    string.contains(cue, "\t\t\titemMin: 0\n\t\t\titemMax: 1023\n")
+  cue_vet(cue)
+  // A default must respect the bounds.
+  let bad_default = {
+    use shards <- docuconf.env(
+      docuconf.int_list(
+        "SHARDS",
+        "Shard ids this instance owns",
+        separator: ",",
+      )
+      |> docuconf.item_max(3)
+      |> docuconf.default([1, 4]),
+    )
+    docuconf.succeed(shards)
+  }
+  let assert [_] = docuconf.check_declaration(bad_default)
+}
+
 pub fn bad_int_test() {
   let root = file_root()
   let assert [#("PORT", "invalid_type")] =
     codes(load(root, [#("PORT", "80.5")]))
-  let assert [#("PORT", "invalid_type")] =
+  let assert [#("PORT", "out_of_range")] =
     codes(load(root, [#("PORT", "99999999999999999999")]))
   // Values are never trimmed.
   let assert [#("PORT", "invalid_type")] =
@@ -809,8 +914,10 @@ pub fn int64_range_test() {
         |> docuconf.without_termination_log,
     )
   }
-  let assert [#("N", "invalid_type")] = codes(load("9223372036854775808"))
-  let assert [#("N", "invalid_type")] = codes(load("-9223372036854775809"))
+  let assert [#("N", "out_of_range")] = codes(load("9223372036854775808"))
+  let assert [#("N", "out_of_range")] = codes(load("-9223372036854775809"))
+  let assert [#("N", "out_of_range")] = codes(load("99999999999999999999"))
+  let assert [#("N", "invalid_type")] = codes(load("1e3"))
   case support.target() {
     "erlang" -> {
       let assert Ok(n) = load("9223372036854775807")
@@ -894,7 +1001,24 @@ pub fn javascript_int_range_test() {
         )
       let assert [#("N", "out_of_range")] =
         codes(load(unbounded, [#("N", "-9007199254740992")]))
+      // int lists carry the same range through itemMin and itemMax.
+      let assert True =
+        string.contains(
+          cue,
+          "\t\t\titemMin: -9007199254740991\n\t\t\titemMax: 9007199254740991\n",
+        )
+      cue_vet(cue)
       let assert [_, _] = docuconf.check_declaration(wide)
+      let wide_items = {
+        use ns <- docuconf.env(
+          docuconf.int_list("NS", "Big numbers", separator: ",")
+          |> docuconf.item_min(-two_53)
+          |> docuconf.item_max(two_53)
+          |> docuconf.optional,
+        )
+        docuconf.succeed(ns)
+      }
+      let assert [_, _] = docuconf.check_declaration(wide_items)
       let defaulted = {
         use n <- docuconf.env(
           docuconf.int("N", "A big number")
@@ -908,6 +1032,7 @@ pub fn javascript_int_range_test() {
     _ -> {
       let assert False = string.contains(cue, "min")
       let assert False = string.contains(cue, "max")
+      let assert False = string.contains(cue, "itemM")
       let assert Ok(#(Some(n), Some([1, m]))) =
         load(unbounded, [
           #("N", "9007199254740993"),
@@ -956,4 +1081,98 @@ pub fn re2_semantics_test() {
   let assert True = matches("\\bfoo\\b", "a foo b")
   let assert False = matches("\\bfoo\\b", "afoob")
   let assert True = matches("^(?P<x>a)\\z", "a")
+}
+
+// ---- contract-first -------------------------------------------------------------
+
+const orders_contract = "{
+  \"apiVersion\": \"docuconf.dev/v1alpha1\",
+  \"kind\": \"ConfigContract\",
+  \"metadata\": {\"name\": \"orders\", \"generator\": {\"language\": \"go\", \"sdk\": \"docuconf-go\", \"version\": \"0.1.0\"}},
+  \"vars\": {
+    \"PORT\": {\"type\": \"int\", \"description\": \"HTTP listen port\", \"min\": 1, \"max\": 65535, \"default\": 8080},
+    \"BROKERS\": {\"type\": \"list\", \"description\": \"Kafka bootstrap servers\", \"items\": \"string\", \"encoding\": \"indexed\", \"required\": true, \"minItems\": 1},
+    \"PARTITIONS\": {\"type\": \"list\", \"description\": \"Partitions this instance consumes\", \"items\": \"int\", \"encoding\": \"json\", \"itemMin\": 0, \"itemMax\": 63},
+    \"TIMEOUT\": {\"type\": \"duration\", \"description\": \"Checkout timeout\", \"encoding\": \"iso8601\", \"max\": \"1m\", \"default\": \"15s\"},
+    \"DRAIN\": {\"type\": \"duration\", \"description\": \"Time to drain\", \"encoding\": \"timespan\"},
+    \"RATIO\": {\"type\": \"float\", \"description\": \"Sample ratio\", \"min\": 0, \"max\": 1},
+    \"LEVEL\": {\"type\": \"enum\", \"description\": \"Log level\", \"values\": [\"debug\", \"info\"], \"default\": \"info\"},
+    \"TOKEN\": {\"type\": \"string\", \"description\": \"API token\", \"secret\": true, \"minLength\": 10},
+    \"LIMITS\": {\"type\": \"json\", \"description\": \"Rate limits\", \"schema\": {\"type\": \"object\"}}
+  }
+}"
+
+pub fn contract_first_test() {
+  let load = docuconf_contract_first_load
+  let assert Ok(values) =
+    load([
+      #("BROKERS__0", "kafka-0:9092"),
+      #("BROKERS__1", "kafka-1:9092"),
+      #("BROKERS__3", "ignored: index 2 is missing"),
+      #("PARTITIONS", "[0, 7]"),
+      #("TIMEOUT", "PT30.5S"),
+      #("DRAIN", "00:01:30"),
+      #("RATIO", "0.5"),
+      #("TOKEN", "0123456789abc"),
+      #("LIMITS", "{\"perMinute\": 60}"),
+    ])
+  let get = fn(name) {
+    let assert Ok(v) = dict.get(values, name)
+    json.to_string(contract_first.to_json(v))
+  }
+  let assert "8080" = get("PORT")
+  let assert "[\"kafka-0:9092\",\"kafka-1:9092\"]" = get("BROKERS")
+  let assert "[0,7]" = get("PARTITIONS")
+  let assert "\"30s500ms\"" = get("TIMEOUT")
+  let assert "\"1m30s\"" = get("DRAIN")
+  let assert "\"info\"" = get("LEVEL")
+  let assert "\"0123456789abc\"" = get("TOKEN")
+  let assert "{\"perMinute\":60}" = get("LIMITS")
+  let assert Ok(contract_first.FloatValue(0.5)) = dict.get(values, "RATIO")
+  let assert Ok(contract_first.IntValue(8080)) = dict.get(values, "PORT")
+  // Every problem together, with the same codes as a declaration.
+  let assert Error(docuconf.InvalidConfig(vs) as e) =
+    load([
+      #("PARTITIONS", "[1, 64]"),
+      #("TIMEOUT", "2m"),
+      #("DRAIN", "25:00:00"),
+      #("LEVEL", "trace"),
+      #("TOKEN", "short-tok"),
+      #("LIMITS", "{"),
+    ])
+  let assert [
+    #("BROKERS", "missing_required"),
+    #("DRAIN", "invalid_type"),
+    #("LEVEL", "not_in_enum"),
+    #("LIMITS", "invalid_type"),
+    #("PARTITIONS", "out_of_range"),
+    #("TIMEOUT", "invalid_type"),
+    #("TOKEN", "out_of_range"),
+  ] = list.map(vs, fn(v) { #(v.input, docuconf.code_to_string(v.code)) })
+  let assert False = string.contains(docuconf.describe(e), "short-tok")
+  // The contract a contract-first spec exports passes the meta-schema.
+  let assert Ok(contract) = json.parse(orders_contract)
+  let assert Ok(spec) = contract_first.spec(contract)
+  let assert Ok(cue) = docuconf.contract(spec, name: "orders")
+  let assert True = string.contains(cue, "encoding: \"indexed\"")
+  let assert True = string.contains(cue, "encoding: \"iso8601\"")
+  cue_vet(cue)
+  // Malformed contracts are declaration errors.
+  let assert Error(docuconf.InvalidDeclaration(_)) =
+    contract_first.load("{", docuconf.options())
+  let assert Error(docuconf.InvalidDeclaration([_, _])) =
+    contract_first.load(
+      "{\"vars\": {\"A\": {\"type\": \"text\", \"description\": \"Some text\"},"
+        <> " \"B\": {\"type\": \"list\", \"items\": \"string\", \"itemMax\": 1, \"description\": \"Some list\"}}}",
+      docuconf.options(),
+    )
+}
+
+fn docuconf_contract_first_load(env: List(#(String, String))) {
+  contract_first.load(
+    orders_contract,
+    docuconf.options()
+      |> docuconf.with_env(dict.from_list(env))
+      |> docuconf.without_termination_log,
+  )
 }

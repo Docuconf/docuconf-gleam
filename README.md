@@ -128,15 +128,27 @@ gleam run -m orders/contract
 | `float` | `float` | `Float` (NaN/Inf rejected) | `min_float`, `max_float` |
 | `bool` | `bool` | `Bool` (`true`/`false`, any case) | |
 | `duration` | `duration` (`go` encoding) | `docuconf/duration.Duration` | `min_duration`, `max_duration` |
+| `duration_with(name, desc, encoding: Iso8601)` | `duration` (`go`, `iso8601`, `seconds`, `timespan`) | `docuconf/duration.Duration` | `min_duration`, `max_duration` |
 | `url` | `url` | `String` | `schemes` |
 | `enum(name, desc, [#("debug", Debug), ...])` | `enum` | your own type | |
 | `string_list(name, desc, separator: ",")` | `list` (`csv`) | `List(String)` | `min_items`, `max_items` |
-| `int_list(name, desc, separator: ",")` | `list` (`csv`) | `List(Int)` | `min_items`, `max_items` |
+| `int_list(name, desc, separator: ",")` | `list` (`csv`) | `List(Int)` | `min_items`, `max_items`, `item_min`, `item_max` |
+| `string_list_with(name, desc, encoding: Indexed)` | `list` (`csv`, `json`, `indexed`) | `List(String)` | `min_items`, `max_items` |
+| `int_list_with(name, desc, encoding: JsonArray)` | `list` (`csv`, `json`, `indexed`) | `List(Int)` | `min_items`, `max_items`, `item_min`, `item_max` |
 | `json(name, desc, decoder, placeholder, encode)` | `json` | your own type | `schema` |
 
 Every builder also takes `secret`, `group`, `examples`, `config_key`,
 `deprecated` and `deploy_time_switch`. Finish each one with `required`,
-`optional` (a `None` when unset) or `default(value)`.
+`optional` (a `None` when unset) or `default(value)`, and transform the
+finished variable's value with `map` if you like.
+
+- **Encodings** (SPEC §5): lists are `Csv(separator)` (`a,b`), `JsonArray`
+  (`["a","b"]`) or `Indexed` (`NAME__0=a`, `NAME__1=b`, up to the first
+  missing index); durations are `Go` (`1m30s`), `Iso8601` (`PT90S`),
+  `Seconds` (`90`, `1.5`) or `Timespan` (`[d.]hh:mm:ss[.fff]`). The contract
+  records the encoding, and the platform renders values to match. The
+  parsers are also public: `duration.parse_iso8601`, `parse_seconds` and
+  `parse_timespan`.
 
 - **Durations** use Go syntax (`1m30s`, `250ms`, `1.5h`), parsed by docuconf,
   and are written to the contract in canonical form (`1h30m`).
@@ -149,9 +161,21 @@ Every builder also takes `secret`, `group`, `examples`, `config_key`,
   range (SPEC §5): `-9007199254740991` and `9007199254740991` unless
   `min_int`/`max_int` narrow them. Wider bounds or defaults are declaration
   errors, and a value beyond the range is `out_of_range` at boot rather
-  than silently rounded. The Erlang target accepts the whole 64-bit range,
+  than silently rounded. `int_list` does the same for its items through
+  `itemMin` and `itemMax`. The Erlang target accepts the whole 64-bit range,
   so the same declaration can export different bounds per target; pin them
-  with `min_int`/`max_int` if the contract must not depend on the target.
+  with `min_int`/`max_int` (or `item_min`/`item_max`) if the contract must
+  not depend on the target.
+- **Item bounds**: `item_min` and `item_max` bound every item of an
+  `int_list` and are exported as `itemMin` and `itemMax`. An item outside
+  them is `out_of_range`:
+
+  ```gleam
+  docuconf.int_list("SHARDS", "Shard ids this instance owns", separator: ",")
+  |> docuconf.item_min(0)
+  |> docuconf.item_max(1023)
+  |> docuconf.optional
+  ```
 - **Empty strings** are present values for `string` and unset for every
   other type. Values are never trimmed.
 - **`json` and config files** decode into your own type with a
@@ -218,6 +242,26 @@ secret variable still holds the reference; docuconf reports that as
   - DATABASE_URL [invalid_type]: holds an unresolved vault: reference; the injector that should resolve it did not run
 ```
 
+## Contract-first mode
+
+`docuconf/contract_first` validates an environment against a contract given
+as JSON, with no Gleam declaration (SPEC §11.2 item 11): for a contract
+written by hand in CUE and exported with `cue export --out json`, or one a
+platform hands you. Each variable goes through the same builders and checks
+as a declaration, and every list and duration encoding is read.
+
+```gleam
+let assert Ok(values) = contract_first.load(contract_json, docuconf.options())
+let assert Ok(contract_first.IntValue(port)) = dict.get(values, "PORT")
+```
+
+`load` returns a `Dict(String, Value)`, with `Absent` for an unset optional
+variable, or the same `InvalidConfig` error as `load_with`.
+`contract_first.spec(json)` returns the declaration instead, for
+`load_with` or `contract`. File inputs are not supported (a contract with
+`files` is rejected), and `json` values are not checked against their JSON
+Schema.
+
 ## Config-file overlays
 
 There is no overlay API (SPEC §4.7). envoy reads the environment and
@@ -234,10 +278,30 @@ Compared with the specification and the Elixir SDK:
 - `reload: watch` is not offered; every file input is `restart`.
 - JSON Schemas are not generated from types (Gleam has no reflection) and
   are not checked at boot. The decoder is the boot-time check.
-- No `.env` loading, no contract-first mode, no profiles (SPEC §4.4).
-- `int_list` items on JavaScript: the contract has no per-item bounds, so
-  the platform may accept an item beyond ±(2^53 − 1); the boot check then
-  rejects it as `out_of_range`.
+- No `.env` loading, no profiles (SPEC §4.4).
+
+## Conformance
+
+The shared conformance suite of
+[docuconf-go](https://github.com/docuconf/docuconf-go/tree/main/conformance)
+(SPEC §12) runs in `gleam test` through contract-first mode
+(`test/conformance_test.gleam`). It reads `cases.json` from
+`DOCUCONF_CONFORMANCE`, else `../docuconf-go/conformance/cases.json`, prints
+how many cases passed, were skipped and failed, and names each failure by
+case id. It is skipped when the file is missing, unless
+`DOCUCONF_REQUIRE_CONFORMANCE=1` (as in CI).
+
+```sh
+DOCUCONF_CONFORMANCE=../docuconf-go/conformance/cases.json DOCUCONF_REQUIRE_CONFORMANCE=1 gleam test
+DOCUCONF_CONFORMANCE=../docuconf-go/conformance/cases.json DOCUCONF_REQUIRE_CONFORMANCE=1 gleam test --target javascript
+```
+
+Capability tags skipped:
+
+| Tag | Target | Why |
+|---|---|---|
+| `json-schema` | both | docuconf has no JSON Schema validator; `json` values are checked by your decoder in a declaration, and not at all in contract-first mode. |
+| `int64` | JavaScript only | An `Int` is a double there, exact only within ±(2^53 − 1). The Erlang target runs these cases. |
 
 ## Development
 
@@ -258,5 +322,4 @@ source checkouts of the dependencies (see the script).
 
 ## Licence
 
-The licence has not been chosen yet, so this repository has no LICENSE file.
-Do not publish the package until one is added (see [RELEASING.md](RELEASING.md)).
+MIT. See [LICENSE](LICENSE).
