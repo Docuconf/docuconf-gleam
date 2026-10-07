@@ -1,18 +1,20 @@
 # Releasing
 
-The package is published to [Hex](https://hex.pm/packages/docuconf) with
-`gleam publish`, by `.github/workflows/release.yml` when a `v*` tag is
-pushed. Docs go to HexDocs at the same time.
+The package is published to [Hex](https://hex.pm/packages/docuconf_gleam)
+as `docuconf_gleam` with `gleam publish`, by
+`.github/workflows/release.yml` when a `v*` tag is pushed. Docs go to
+HexDocs at the same time.
 
-Note: the Elixir SDK (docuconf-elixir) is also named `docuconf` on Hex.
-Hex has one namespace for Erlang, Elixir and Gleam packages, so the two
-cannot both be published as `docuconf`. Decide on the names before the
-first release, for example `docuconf` for Elixir and `docuconf_gleam` for
-Gleam (change `name` in `gleam.toml`; the module names can stay).
+The Hex name is `docuconf_gleam` because Hex has one namespace for Erlang,
+Elixir and Gleam packages, and the Elixir SDK (docuconf-elixir) is named
+`docuconf`. The module names stay `docuconf`, `docuconf/duration` and so
+on, so code reads `import docuconf` either way.
 
 ## Before the first release
 
-1. **Settle the package name** (see the note above).
+1. **Check the name is free**: <https://hex.pm/packages/docuconf_gleam>
+   should not exist yet. After the release, change the README's Install
+   section from the git dependency to `gleam add docuconf_gleam`.
 2. **Create an API key.** Hex has no OIDC trusted publishing. Create a key
    that can publish (`mix hex.user key generate --permission api:write`, or
    on hex.pm under Dashboard, Keys) and store it as the `HEXPM_API_KEY`

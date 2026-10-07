@@ -1,4 +1,4 @@
-name = "docuconf"
+name = "docuconf_gleam"
 version = "0.1.0"
 description = "Typed configuration contracts for Gleam apps: declare env vars and files, validate them at boot and export a CUE contract."
 licences = ["MIT"]

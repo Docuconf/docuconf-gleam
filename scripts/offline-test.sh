@@ -14,14 +14,15 @@
 #
 # When VENDOR also holds wisp and mist with their dependencies (wisp's
 # manifest.toml lists them), the script then checks examples/orders as CI
-# does: build, re-export contract.cue and compare, cue vet, and smoke.sh.
+# does: build, test, re-export contract.cue and compare, cue vet, and
+# smoke.sh.
 # A rebar3 checkout (hpack_erl) is wrapped as a Gleam package on the fly.
 set -eu
 : "${VENDOR:?set VENDOR to the directory holding the package checkouts}"
 here=$(cd "$(dirname "$0")/.." && pwd)
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
-cp -r "$here/src" "$here/test" "$here/gleam.toml" "$work/"
+cp -r "$here/src" "$here/test" "$here/gleam.toml" "$here/README.md" "$work/"
 [ -d "$here/examples" ] && cp -r "$here/examples" "$work/"
 rm -rf "$work/examples/orders/build" "$work/examples/orders/manifest.toml"
 
@@ -53,6 +54,7 @@ export DOCUCONF_SPEC_CUE="${DOCUCONF_SPEC_CUE:-$here/../docuconf-go/spec/cue}"
 export DOCUCONF_CONFORMANCE="${DOCUCONF_CONFORMANCE:-$here/../docuconf-go/conformance/cases.json}"
 cd "$work"
 status=0
+gleam format --check src test
 gleam build --warnings-as-errors "$@"
 gleam test "$@" || status=$?
 # Golden files written with UPDATE_GOLDEN=1 are copied back.
@@ -60,8 +62,9 @@ if [ "${UPDATE_GOLDEN:-}" = "1" ]; then cp -r "$work/test/golden/." "$here/test/
 
 if [ -d "$work/vendor/wisp" ] && [ -d "$work/examples/orders" ]; then
   cd "$work/examples/orders"
-  gleam format --check src
+  gleam format --check src dev test
   gleam build --warnings-as-errors
+  gleam test
   gleam run -m orders/contract
   # UPDATE_GOLDEN=1 also takes the freshly exported contract.
   if [ "${UPDATE_GOLDEN:-}" = "1" ]; then cp contract.cue "$here/examples/orders/contract.cue"; fi
@@ -70,7 +73,9 @@ if [ -d "$work/vendor/wisp" ] && [ -d "$work/examples/orders" ]; then
     vet=$(mktemp -d "$work/vet.XXXX")
     cp -r "$DOCUCONF_SPEC_CUE/cue.mod" "$DOCUCONF_SPEC_CUE/contract" "$vet/"
     mkdir "$vet/orders" && cp contract.cue "$vet/orders/"
-    (cd "$vet" && cue vet -c ./orders) && echo "orders: cue vet -c ok"
+    # Not `a && b`: set -e ignores a failure on the left of &&.
+    (cd "$vet" && cue vet -c ./orders)
+    echo "orders: cue vet -c ok"
   fi
   ./smoke.sh
 fi
