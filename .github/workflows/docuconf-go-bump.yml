@@ -1,4 +1,4 @@
-name: docuconf-go bump
+name: Bump docuconf-go
 
 # Keeps .github/docuconf-go.ref (the docuconf-go commit this SDK is tested
 # against) current. docuconf-go's notify-sdks workflow sends a
@@ -89,8 +89,7 @@ jobs:
           commit-message: |
             build(deps): bump docuconf-go to ${{ steps.target.outputs.short }}
 
-            Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
-            Claude-Session: https://claude.ai/code/session_018zU6RpCNM51CvRfBVoE46H
+            https://github.com/Docuconf/docuconf-go/compare/${{ steps.target.outputs.old }}...${{ steps.target.outputs.sha }}
           body: |
             Pins docuconf-go to [`${{ steps.target.outputs.short }}`](https://github.com/Docuconf/docuconf-go/commit/${{ steps.target.outputs.sha }}).
 

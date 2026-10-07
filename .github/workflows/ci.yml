@@ -40,7 +40,8 @@ jobs:
       # The contract meta-schema (spec/cue) and the conformance suite
       # (conformance/cases.json) live in docuconf-go; the export test vets
       # generated contracts against the first, the runner reads the second.
-      - uses: actions/checkout@v4
+      - name: Check out docuconf-go
+        uses: actions/checkout@v4
         with:
           repository: docuconf/docuconf-go
           ref: ${{ steps.dcref.outputs.ref }}
@@ -74,7 +75,7 @@ jobs:
           DOCUCONF_CONFORMANCE: ${{ github.workspace }}/docuconf-go/conformance/cases.json
           DOCUCONF_REQUIRE_CONFORMANCE: "1"
 
-      - name: Conformance (scripts/conformance.sh)
+      - name: Run scripts/conformance.sh
         run: DOCUCONF_GO_DIR="$GITHUB_WORKSPACE/docuconf-go" scripts/conformance.sh
         env:
           GLEAM_TARGET: ${{ matrix.target }}
@@ -99,7 +100,8 @@ jobs:
           if [ "$EVENT" = schedule ]; then echo "ref=main" >> "$GITHUB_OUTPUT"
           elif [ -n "$OVERRIDE" ]; then echo "ref=$OVERRIDE" >> "$GITHUB_OUTPUT"
           else echo "ref=$(tr -d '[:space:]' < .github/docuconf-go.ref)" >> "$GITHUB_OUTPUT"; fi
-      - uses: actions/checkout@v4
+      - name: Check out docuconf-go
+        uses: actions/checkout@v4
         with:
           repository: docuconf/docuconf-go
           ref: ${{ steps.dcref.outputs.ref }}
