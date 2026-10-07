@@ -17,9 +17,13 @@ jobs:
     environment: hex
     steps:
       - uses: actions/checkout@v4
+      - name: Pick the docuconf-go ref
+        id: dcref
+        run: echo "ref=$(tr -d '[:space:]' < .github/docuconf-go.ref)" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v4
         with:
           repository: docuconf/docuconf-go
+          ref: ${{ steps.dcref.outputs.ref }}
           path: docuconf-go
       - uses: erlef/setup-beam@v1
         with:

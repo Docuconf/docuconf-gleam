@@ -1,0 +1,107 @@
+name: docuconf-go bump
+
+# Keeps .github/docuconf-go.ref (the docuconf-go commit this SDK is tested
+# against) current. docuconf-go's notify-sdks workflow sends a
+# repository_dispatch when its main branch changes; the daily schedule catches
+# up when no dispatch arrives (before the release GitHub App exists). Either
+# way the result is one "bump docuconf-go" pull request on the
+# docuconf-go-bump branch, and CI on that pull request is the compatibility
+# check.
+on:
+  repository_dispatch:
+    types: [docuconf-go-updated]
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: docuconf-go commit (full SHA) to pin; empty means the tip of main
+        required: false
+        default: ""
+  schedule:
+    - cron: "41 6 * * *"
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+
+concurrency:
+  group: docuconf-go-bump
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    name: Bump docuconf-go
+    runs-on: ubuntu-latest
+    env:
+      HAS_APP: ${{ secrets.RELEASE_APP_ID != '' && secrets.RELEASE_APP_PRIVATE_KEY != '' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Pick the target commit
+        id: target
+        env:
+          PAYLOAD_SHA: ${{ github.event.client_payload.sha }}
+          INPUT_SHA: ${{ inputs.sha }}
+        run: |
+          sha="${PAYLOAD_SHA:-${INPUT_SHA:-}}"
+          if [ -z "$sha" ]; then
+            sha=$(git ls-remote https://github.com/Docuconf/docuconf-go refs/heads/main | cut -f1)
+          fi
+          if ! printf '%s' "$sha" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "::error::not a full docuconf-go commit SHA: '$sha'"
+            exit 1
+          fi
+          old=$(tr -d '[:space:]' < .github/docuconf-go.ref)
+          {
+            echo "sha=$sha"
+            echo "short=${sha:0:12}"
+            echo "old=$old"
+            if [ "$sha" = "$old" ]; then echo "changed=false"; else echo "changed=true"; fi
+          } >> "$GITHUB_OUTPUT"
+          if [ "$sha" = "$old" ]; then echo "Already pinned to $sha"; fi
+
+      - name: Write the ref file
+        if: steps.target.outputs.changed == 'true'
+        env:
+          SHA: ${{ steps.target.outputs.sha }}
+        run: echo "$SHA" > .github/docuconf-go.ref
+
+      - name: Create a GitHub App token
+        id: app-token
+        if: steps.target.outputs.changed == 'true' && env.HAS_APP == 'true'
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+
+      - name: Open or update the bump pull request
+        id: cpr
+        if: steps.target.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@v7
+        with:
+          token: ${{ steps.app-token.outputs.token || github.token }}
+          branch: docuconf-go-bump
+          base: main
+          delete-branch: true
+          title: "build(deps): bump docuconf-go to ${{ steps.target.outputs.short }}"
+          commit-message: |
+            build(deps): bump docuconf-go to ${{ steps.target.outputs.short }}
+
+            Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+            Claude-Session: https://claude.ai/code/session_018zU6RpCNM51CvRfBVoE46H
+          body: |
+            Pins docuconf-go to [`${{ steps.target.outputs.short }}`](https://github.com/Docuconf/docuconf-go/commit/${{ steps.target.outputs.sha }}).
+
+            Changes: https://github.com/Docuconf/docuconf-go/compare/${{ steps.target.outputs.old }}...${{ steps.target.outputs.sha }}
+
+            CI on this pull request is the compatibility check: merge it when it passes.
+
+      # A pull request pushed with GITHUB_TOKEN starts no workflows, so start CI
+      # on the branch by hand; its checks show on the pull request's head commit.
+      - name: Run CI on the bump branch
+        if: steps.target.outputs.changed == 'true' && env.HAS_APP != 'true' && (steps.cpr.outputs.pull-request-operation == 'created' || steps.cpr.outputs.pull-request-operation == 'updated')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run ci.yml --ref docuconf-go-bump
