@@ -10,6 +10,7 @@ import gleam/int
 import gleam/list
 import gleam/string
 
+/// A JSON value. Build it with the constructors or the functions below.
 pub type Json {
   Null
   Bool(Bool)
@@ -20,30 +21,37 @@ pub type Json {
   Object(List(#(String, Json)))
 }
 
+/// `null`.
 pub fn null() -> Json {
   Null
 }
 
+/// `true` or `false`.
 pub fn bool(b: Bool) -> Json {
   Bool(b)
 }
 
+/// An integer.
 pub fn int(i: Int) -> Json {
   Int(i)
 }
 
+/// A number with a fraction.
 pub fn float(f: Float) -> Json {
   Float(f)
 }
 
+/// A string.
 pub fn string(s: String) -> Json {
   String(s)
 }
 
+/// An array, encoding each item: `array(["a", "b"], string)`.
 pub fn array(items: List(a), of encode: fn(a) -> Json) -> Json {
   Array(list.map(items, encode))
 }
 
+/// An object; fields keep the order given.
 pub fn object(fields: List(#(String, Json))) -> Json {
   Object(fields)
 }

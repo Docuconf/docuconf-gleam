@@ -211,8 +211,6 @@ fn check_errors(
     |> list.sort(string.compare)
   case loaded {
     Ok(_) -> Failed("expected errors " <> string.join(want, ", ") <> ", loaded")
-    Error(docuconf.InvalidDeclaration(_) as e) ->
-      Failed("contract rejected: " <> docuconf.describe(e))
     Error(docuconf.InvalidConfig(violations) as e) -> {
       let got =
         list.map(violations, fn(v) {
@@ -236,6 +234,7 @@ fn check_errors(
         True, _ -> Failed("a secret value appears in the error output")
       }
     }
+    Error(e) -> Failed("contract rejected: " <> docuconf.describe(e))
   }
 }
 

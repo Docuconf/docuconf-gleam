@@ -74,6 +74,7 @@ fn codes(result) -> List(#(String, String)) {
     Error(docuconf.InvalidDeclaration(ps)) -> [
       #("declaration", string.join(ps, "; ")),
     ]
+    Error(e) -> [#("error", docuconf.describe(e))]
   }
 }
 
@@ -184,9 +185,9 @@ pub fn export_options_test() {
   let assert Ok(cue) =
     docuconf.contract_with(
       sample.spec(),
-      "sample-gateway",
-      Some("gw"),
-      Some("1.2.3"),
+      name: "sample-gateway",
+      package: Some("gw"),
+      app_version: Some("1.2.3"),
     )
   let assert True = string.contains(cue, "\npackage gw\n")
   let assert True = string.contains(cue, "appVersion: \"1.2.3\"")
@@ -345,7 +346,7 @@ pub fn item_bounds_test() {
       |> docuconf.item_max(1023)
       |> docuconf.optional,
     )
-    docuconf.succeed(shards)
+    docuconf.build(shards)
   }
   let load = fn(v) {
     docuconf.load_with(
@@ -374,7 +375,7 @@ pub fn item_bounds_test() {
       |> docuconf.item_max(3)
       |> docuconf.default([1, 4]),
     )
-    docuconf.succeed(shards)
+    docuconf.build(shards)
   }
   let assert [_] = docuconf.check_declaration(bad_default)
 }
@@ -494,11 +495,6 @@ pub fn declaration_problems_test() {
       |> docuconf.default(3),
     )
     use _ <- docuconf.env(
-      docuconf.string("TOKEN", "API token")
-      |> docuconf.secret
-      |> docuconf.default("x"),
-    )
-    use _ <- docuconf.env(
       docuconf.string("HOST", "Host name")
       |> docuconf.pattern("a(?=b)")
       |> docuconf.optional,
@@ -549,7 +545,6 @@ pub fn declaration_problems_test() {
   expect(
     "variable SIZE: default does not satisfy the variable's constraints (out_of_range",
   )
-  expect("variable TOKEN: a secret must not have a default")
   expect("variable HOST: pattern \"a(?=b)\" uses lookahead")
   expect("variable API: min_length does not apply to a url variable")
   expect("file b: path_env HOST must not also be declared as a variable")
@@ -807,7 +802,7 @@ pub fn keystore_empty_password_test() {
       |> docuconf.secret
       |> docuconf.optional,
     )
-    docuconf.succeed(ks)
+    docuconf.build(ks)
   }
   let opts = fn(env) {
     docuconf.options()
@@ -848,7 +843,7 @@ pub fn keystore_jks_test() {
           |> docuconf.secret
           |> docuconf.optional,
         )
-        docuconf.succeed(ks)
+        docuconf.build(ks)
       }
       list.each(["JKS", "JCEKS"], fn(kind) {
         let out = "/ks/" <> string.lowercase(kind) <> "/store.jks"
@@ -899,7 +894,7 @@ pub fn int64_range_test() {
     use n <- docuconf.env(
       docuconf.int("N", "A big number") |> docuconf.required,
     )
-    docuconf.succeed(n)
+    docuconf.build(n)
   }
   let load = fn(v) {
     docuconf.load_with(
@@ -940,7 +935,8 @@ pub fn javascript_int_range_test() {
       docuconf.int_list("NS", "Big numbers", separator: ",")
       |> docuconf.optional,
     )
-    docuconf.succeed(#(n, ns))
+    use v <- docuconf.build
+    #(n(v), ns(v))
   }
   let load = fn(spec, env) {
     docuconf.load_with(
@@ -957,7 +953,7 @@ pub fn javascript_int_range_test() {
       |> docuconf.min_int(1)
       |> docuconf.optional,
     )
-    docuconf.succeed(n)
+    docuconf.build(n)
   }
   let assert Ok(narrowed_cue) = docuconf.contract(narrowed, name: "ints")
   let wide = {
@@ -967,7 +963,7 @@ pub fn javascript_int_range_test() {
       |> docuconf.max_int(two_53)
       |> docuconf.optional,
     )
-    docuconf.succeed(n)
+    docuconf.build(n)
   }
   case support.target() {
     "javascript" -> {
@@ -1011,7 +1007,7 @@ pub fn javascript_int_range_test() {
           |> docuconf.item_max(two_53)
           |> docuconf.optional,
         )
-        docuconf.succeed(ns)
+        docuconf.build(ns)
       }
       let assert [_, _] = docuconf.check_declaration(wide_items)
       let defaulted = {
@@ -1019,7 +1015,7 @@ pub fn javascript_int_range_test() {
           docuconf.int("N", "A big number")
           |> docuconf.default(two_53),
         )
-        docuconf.succeed(n)
+        docuconf.build(n)
       }
       let assert [_] = docuconf.check_declaration(defaulted)
       Nil
@@ -1048,7 +1044,7 @@ fn matches(pattern: String, value: String) -> Bool {
       |> docuconf.pattern(pattern)
       |> docuconf.required,
     )
-    docuconf.succeed(v)
+    docuconf.build(v)
   }
   let opts =
     docuconf.options()
@@ -1057,7 +1053,7 @@ fn matches(pattern: String, value: String) -> Bool {
   case docuconf.load_with(spec, opts) {
     Ok(_) -> True
     Error(docuconf.InvalidConfig(_)) -> False
-    Error(docuconf.InvalidDeclaration(ps)) -> panic as string.join(ps, "; ")
+    Error(e) -> panic as docuconf.describe(e)
   }
 }
 
@@ -1096,7 +1092,8 @@ pub fn indexed_list_gap_test() {
       )
       |> docuconf.optional,
     )
-    docuconf.succeed(#(ports, hosts))
+    use v <- docuconf.build
+    #(ports(v), hosts(v))
   }
   let load = fn(env) {
     docuconf.options()

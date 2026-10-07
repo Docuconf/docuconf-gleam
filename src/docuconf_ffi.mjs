@@ -45,10 +45,18 @@ export function file_info(path) {
 export function write_file(path, text) {
   try {
     fs.writeFileSync(path, text);
-  } catch {
-    // best effort
+    return new Ok(undefined);
+  } catch (e) {
+    return new Error((e.code ?? "error").toLowerCase());
   }
-  return undefined;
+}
+
+export function exit(status) {
+  process.exit(status);
+}
+
+export function identity(x) {
+  return x;
 }
 
 export function file_exists(path) {
