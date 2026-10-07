@@ -178,6 +178,7 @@ fn declare(name: String, def: Json) -> Result(Var(Value), String) {
     "url" -> {
       let b = docuconf.url(name, description)
       use b <- result.try(apply(b, def, "schemes", strings, docuconf.schemes))
+      use b <- result.try(apply(b, def, "maxLength", whole, docuconf.max_length))
       finish(b, def, StringValue, string_of)
     }
     "enum" -> {
@@ -198,6 +199,7 @@ fn declare(name: String, def: Json) -> Result(Var(Value), String) {
           j
         })
       use b <- result.try(apply(b, def, "schema", any, docuconf.schema))
+      use b <- result.try(apply(b, def, "maxLength", whole, docuconf.max_length))
       finish(b, def, JsonValue, Ok)
     }
     other -> Error("unknown type " <> json.quote(other))
@@ -221,6 +223,20 @@ fn declare_list(
         bounds(docuconf.string_list_with(name, description, encoding:)),
       )
       use b <- result.try(no_item_bounds(b, def))
+      use b <- result.try(apply(
+        b,
+        def,
+        "itemMinLength",
+        whole,
+        docuconf.item_min_length,
+      ))
+      use b <- result.try(apply(
+        b,
+        def,
+        "itemMaxLength",
+        whole,
+        docuconf.item_max_length,
+      ))
       finish(b, def, fn(l) { ListValue(list.map(l, StringValue)) }, fn(j) {
         list_of(j, string_of)
       })
@@ -229,6 +245,7 @@ fn declare_list(
       use b <- result.try(
         bounds(docuconf.int_list_with(name, description, encoding:)),
       )
+      use b <- result.try(no_item_lengths(b, def))
       use b <- result.try(apply(b, def, "itemMin", whole, docuconf.item_min))
       use b <- result.try(apply(b, def, "itemMax", whole, docuconf.item_max))
       finish(b, def, fn(l) { ListValue(list.map(l, IntValue)) }, fn(j) {
@@ -243,6 +260,19 @@ fn no_item_bounds(b: VarBuilder(a), def: Def) -> Result(VarBuilder(a), String) {
   case list.key_find(def, "itemMin"), list.key_find(def, "itemMax") {
     Error(Nil), Error(Nil) -> Ok(b)
     _, _ -> Error("itemMin and itemMax only apply to int lists")
+  }
+}
+
+fn no_item_lengths(
+  b: VarBuilder(a),
+  def: Def,
+) -> Result(VarBuilder(a), String) {
+  case
+    list.key_find(def, "itemMinLength"),
+    list.key_find(def, "itemMaxLength")
+  {
+    Error(Nil), Error(Nil) -> Ok(b)
+    _, _ -> Error("itemMinLength and itemMaxLength only apply to string lists")
   }
 }
 

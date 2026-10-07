@@ -321,13 +321,13 @@ this; CI builds it, runs its tests and smoke-tests the running service.
 | `bool` | `bool` | `Bool` (`true`/`false`, any case) | |
 | `duration` | `duration` (`go` encoding) | `docuconf/duration.Duration` | `min_duration`, `max_duration` |
 | `duration_with(name, desc, encoding: Iso8601)` | `duration` (`go`, `iso8601`, `seconds`, `timespan`) | `docuconf/duration.Duration` | `min_duration`, `max_duration` |
-| `url` | `url` | `String` | `schemes` |
+| `url` | `url` | `String` | `schemes`, `max_length` |
 | `enum(name, desc, [#("debug", Debug), ...])` | `enum` | your own type | |
-| `string_list(name, desc, separator: ",")` | `list` (`csv`) | `List(String)` | `min_items`, `max_items` |
+| `string_list(name, desc, separator: ",")` | `list` (`csv`) | `List(String)` | `min_items`, `max_items`, `item_min_length`, `item_max_length` |
 | `int_list(name, desc, separator: ",")` | `list` (`csv`) | `List(Int)` | `min_items`, `max_items`, `item_min`, `item_max` |
-| `string_list_with(name, desc, encoding: Indexed)` | `list` (`csv`, `json`, `indexed`) | `List(String)` | `min_items`, `max_items` |
+| `string_list_with(name, desc, encoding: Indexed)` | `list` (`csv`, `json`, `indexed`) | `List(String)` | `min_items`, `max_items`, `item_min_length`, `item_max_length` |
 | `int_list_with(name, desc, encoding: JsonArray)` | `list` (`csv`, `json`, `indexed`) | `List(Int)` | `min_items`, `max_items`, `item_min`, `item_max` |
-| `json(name, desc, decoder:, encode:)` | `json` | your own type | `schema` |
+| `json(name, desc, decoder:, encode:)` | `json` | your own type | `schema`, `max_length` |
 
 Every builder also takes `secret` (the value becomes a `Secret(a)`),
 `group`, `examples`, `config_key`, `deprecated` and `deploy_time_switch`.
@@ -395,6 +395,16 @@ Finish each one with `required`, `optional` (a `None` when unset) or
     docuconf.build(shards)
   }
   ```
+- **Lengths** count characters, meaning Unicode code points, never bytes:
+  `日本` is 2 characters and `ZÜ01` is 4. `min_length` and `max_length`
+  bound a `string`; `max_length` also bounds a `url` as it is and a `json`
+  value as the app receives it, before parsing and whitespace included (a
+  `json` default is measured as compact JSON). `item_min_length` and
+  `item_max_length` bound each item of a string list after it is split, so
+  a separator never counts; they are exported as `itemMinLength` and
+  `itemMaxLength`, and an `item_min_length` above `item_max_length` is a
+  declaration error. A value out of bounds is `out_of_range`, and a secret
+  is reported by its length, never its value.
 - **Empty strings** are present values for `string` and unset for every
   other type. Values are never trimmed.
 - **`json` and config files** decode into your own type with a
