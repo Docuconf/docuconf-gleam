@@ -445,7 +445,8 @@ pub type ListEncoding {
   /// One variable holding a JSON array: `["a","b"]`.
   JsonArray
   /// One variable per item: `NAME__0=a`, `NAME__1=b`. The list is set when
-  /// `NAME__0` is, and runs up to the first missing index.
+  /// any `NAME__<n>` is; items must run from 0 with no gap, or the variable
+  /// is `invalid_type`. Other suffixes, such as `NAME__HOST`, are not items.
   Indexed
 }
 
@@ -1848,21 +1849,35 @@ pub fn env(var: Var(a), next: fn(a) -> Spec(b)) -> Spec(b) {
     let m = var.meta
     let raw = case list.key_find(m.fields, "encoding") {
       Ok(json.String("indexed")) ->
-        case indexed_items(ctx.env, m.name, 0, []) {
-          [] -> None
-          items -> Some(Items(items))
+        case indexed_items(ctx.env, m.name) {
+          Ok([]) -> Ok(None)
+          Ok(items) -> Ok(Some(Items(items)))
+          Error(missing) ->
+            Error(#(
+              InvalidType,
+              "items must be numbered from "
+                <> m.name
+                <> "__0 with no gap, but "
+                <> m.name
+                <> "__"
+                <> int.to_string(missing)
+                <> " is not set",
+            ))
         }
       _ ->
         case dict.get(ctx.env, m.name) {
           // SPEC §5: empty means unset for every type but string.
-          Ok("") if m.type_ != "string" -> None
-          Ok(s) -> Some(Text(s))
-          Error(Nil) -> None
+          Ok("") if m.type_ != "string" -> Ok(None)
+          Ok(s) -> Ok(Some(Text(s)))
+          Error(Nil) -> Ok(None)
         }
     }
-    let #(value, problems) = case ctx.collect_only {
-      True -> #(var.zero, [])
-      False ->
+    let #(value, problems) = case ctx.collect_only, raw {
+      True, _ -> #(var.zero, [])
+      False, Error(#(code, msg)) -> #(var.zero, [
+        Violation(m.name, VarKind, code, msg),
+      ])
+      False, Ok(raw) ->
         case read_var(var, raw) {
           Ok(v) -> #(v, [])
           Error(#(code, msg)) -> #(var.zero, [
@@ -1875,16 +1890,58 @@ pub fn env(var: Var(a), next: fn(a) -> Spec(b)) -> Spec(b) {
   })
 }
 
-// NAME__0, NAME__1, ... up to the first missing index.
+// The items of an indexed list, NAME__0, NAME__1, ... (SPEC §5). The list
+// is present when any NAME__<n> is set, where <n> is a decimal index with no
+// leading zero; other suffixes such as NAME__HOST are not items. Items must
+// run from 0 with no gap: otherwise this returns the first missing index.
 fn indexed_items(
   env: Dict(String, String),
   name: String,
+) -> Result(List(String), Int) {
+  let prefix = name <> "__"
+  let count =
+    dict.fold(env, 0, fn(count, key, _) {
+      case string.starts_with(key, prefix) {
+        False -> count
+        True ->
+          case list_index(string.drop_start(key, string.length(prefix))) {
+            Ok(i) if i >= count -> i + 1
+            _ -> count
+          }
+      }
+    })
+  collect_items(env, prefix, 0, count, [])
+}
+
+fn collect_items(
+  env: Dict(String, String),
+  prefix: String,
   i: Int,
+  count: Int,
   acc: List(String),
-) -> List(String) {
-  case dict.get(env, name <> "__" <> int.to_string(i)) {
-    Ok(item) -> indexed_items(env, name, i + 1, [item, ..acc])
-    Error(Nil) -> list.reverse(acc)
+) -> Result(List(String), Int) {
+  case i < count {
+    False -> Ok(list.reverse(acc))
+    True ->
+      case dict.get(env, prefix <> int.to_string(i)) {
+        Ok(item) -> collect_items(env, prefix, i + 1, count, [item, ..acc])
+        Error(Nil) -> Error(i)
+      }
+  }
+}
+
+// Parses an item index: ASCII digits with no leading zero.
+fn list_index(suffix: String) -> Result(Int, Nil) {
+  let digits =
+    suffix != ""
+    && string.to_utf_codepoints(suffix)
+    |> list.all(fn(c) {
+      let c = string.utf_codepoint_to_int(c)
+      c >= 0x30 && c <= 0x39
+    })
+  case digits, string.starts_with(suffix, "0") && suffix != "0" {
+    True, False -> int.parse(suffix)
+    _, _ -> Error(Nil)
   }
 }
 

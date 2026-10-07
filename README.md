@@ -143,8 +143,8 @@ Every builder also takes `secret`, `group`, `examples`, `config_key`,
 finished variable's value with `map` if you like.
 
 - **Encodings** (SPEC §5): lists are `Csv(separator)` (`a,b`), `JsonArray`
-  (`["a","b"]`) or `Indexed` (`NAME__0=a`, `NAME__1=b`, up to the first
-  missing index); durations are `Go` (`1m30s`), `Iso8601` (`PT90S`),
+  (`["a","b"]`) or `Indexed` (`NAME__0=a`, `NAME__1=b`, numbered from 0
+  with no gap, or the variable is `invalid_type`); durations are `Go` (`1m30s`), `Iso8601` (`PT90S`),
   `Seconds` (`90`, `1.5`) or `Timespan` (`[d.]hh:mm:ss[.fff]`). The contract
   records the encoding, and the platform renders values to match. The
   parsers are also public: `duration.parse_iso8601`, `parse_seconds` and

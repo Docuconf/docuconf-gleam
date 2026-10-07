@@ -1083,6 +1083,52 @@ pub fn re2_semantics_test() {
   let assert True = matches("^(?P<x>a)\\z", "a")
 }
 
+pub fn indexed_list_gap_test() {
+  let spec = {
+    use ports <- docuconf.env(
+      docuconf.int_list_with(
+        "PORTS",
+        "Worker ports",
+        encoding: docuconf.Indexed,
+      )
+      |> docuconf.optional,
+    )
+    use hosts <- docuconf.env(
+      docuconf.string_list_with(
+        "HOSTS",
+        "Upstream hosts",
+        encoding: docuconf.Indexed,
+      )
+      |> docuconf.optional,
+    )
+    docuconf.succeed(#(ports, hosts))
+  }
+  let load = fn(env) {
+    docuconf.options()
+    |> docuconf.with_env(dict.from_list(env))
+    |> docuconf.without_termination_log
+    |> docuconf.load_with(spec, _)
+  }
+  let assert Ok(#(Some([80, 81]), Some(["a"]))) =
+    load([
+      #("PORTS__0", "80"),
+      #("PORTS__1", "81"),
+      #("HOSTS__0", "a"),
+      #("HOSTS__HOST", "not an item"),
+      #("HOSTS__01", "not an item"),
+    ])
+  let assert Ok(#(None, None)) = load([#("HOSTS__X", "not an item")])
+  let assert Error(docuconf.InvalidConfig([start, gap])) =
+    load([#("PORTS__0", "80"), #("PORTS__2", "82"), #("HOSTS__1", "b")])
+  let assert docuconf.Violation(
+    "PORTS",
+    _,
+    docuconf.InvalidType,
+    "items must be numbered from PORTS__0 with no gap, but PORTS__1 is not set",
+  ) = gap
+  let assert docuconf.Violation("HOSTS", _, docuconf.InvalidType, _) = start
+}
+
 // ---- contract-first -------------------------------------------------------------
 
 const orders_contract = "{
@@ -1108,7 +1154,7 @@ pub fn contract_first_test() {
     load([
       #("BROKERS__0", "kafka-0:9092"),
       #("BROKERS__1", "kafka-1:9092"),
-      #("BROKERS__3", "ignored: index 2 is missing"),
+      #("BROKERS__HOST", "not an item"),
       #("PARTITIONS", "[0, 7]"),
       #("TIMEOUT", "PT30.5S"),
       #("DRAIN", "00:01:30"),
