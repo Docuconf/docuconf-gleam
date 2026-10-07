@@ -38,3 +38,41 @@ Gleam (change `name` in `gleam.toml`; the module names can stay).
 
 `gleam publish --replace` can replace the latest release within Hex's
 grace period. After that, retire a bad release on hex.pm instead.
+
+## GitHub Packages and Releases
+
+GitHub Packages has no Hex registry, so the GitHub copy of each release is the
+GitHub Release. The `github` job in `.github/workflows/release.yml` runs on
+the same `v*` tags, repeats the tag check and the tests on both targets,
+builds the package with `gleam export hex-tarball`, creates the GitHub
+Release for the tag if it does not exist, and attaches
+`docuconf-<version>.tar`, the tarball Hex would get.
+
+It does not depend on the Hex `publish` job, so it works before the Hex
+account, API key and `hex` environment exist. It uses only the workflow's own
+`GITHUB_TOKEN` (`contents: write`); there are no secrets or accounts to set
+up, and nothing to configure beyond the `Docuconf` organization allowing
+`GITHUB_TOKEN` write access (it does unless restricted under Organization
+settings > Actions).
+
+### Installing from a GitHub Release
+
+No token is needed for a public repository. Gleam installs from git, so the
+simplest way to use a release without Hex is the tag itself, in `gleam.toml`:
+
+```toml
+[dependencies]
+docuconf = { git = "https://github.com/Docuconf/docuconf-gleam", ref = "v0.1.0" }
+```
+
+To use the released tarball, unpack it and depend on the directory:
+
+```sh
+curl -sSLO https://github.com/Docuconf/docuconf-gleam/releases/download/v0.1.0/docuconf-0.1.0.tar
+mkdir -p vendor/docuconf && tar -xOf docuconf-0.1.0.tar contents.tar.gz | tar -xzf - -C vendor/docuconf
+```
+
+```toml
+[dependencies]
+docuconf = { path = "vendor/docuconf" }
+```
