@@ -12,3 +12,6 @@ gleam_http = ">= 4.0.0 and < 5.0.0"
 gleam_json = ">= 3.0.0 and < 4.0.0"
 mist = ">= 6.0.0 and < 7.0.0"
 wisp = ">= 2.2.2 and < 3.0.0"
+
+[dev_dependencies]
+gleeunit = ">= 1.0.0 and < 2.0.0"

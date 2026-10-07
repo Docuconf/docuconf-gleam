@@ -8,7 +8,8 @@ builders. That one declaration:
 - loads and checks the environment at startup, and reports every problem at
   once with a stable error code, never printing the secret;
 - gives the app typed values: an `Int` port, a `wisp.LogLevel`, a
-  `List(String)` of origins, a `Duration` timeout;
+  `List(String)` of origins, a `Duration` timeout, and the database URL as
+  a `docuconf.Secret`, which prints redacted in logs;
 - exports [`contract.cue`](contract.cue), which the platform validates
   before it deploys.
 
@@ -34,13 +35,15 @@ curl localhost:8080/healthz   # ok
 curl localhost:8080/config    # the typed values, with "database_url":"***"
 ```
 
-The example depends on the SDK in this repository (`docuconf = { path = "../.." }`
-in `gleam.toml`), not on a published version.
+The example depends on the SDK in this repository
+(`docuconf_gleam = { path = "../.." }` in `gleam.toml`), not on a published
+version.
 
 ## A bad environment
 
-With `PORT=0` and no `DATABASE_URL`, the service does not start. It exits
-with status 1 and prints, after Gleam's own build lines:
+`main` loads the configuration with `docuconf.load_or_exit`. With `PORT=0`
+and no `DATABASE_URL`, the service does not start. It exits with status 1
+and prints, after Gleam's own build lines, with no stack trace:
 
 ```
 $ PORT=0 gleam run
@@ -53,7 +56,19 @@ In Kubernetes the same report also goes to `/dev/termination-log`, so
 `kubectl describe pod` shows it.
 
 [`smoke.sh`](smoke.sh) checks both cases: it starts the service, calls
-`/healthz` and `/config`, then starts it with the bad environment.
+`/healthz` and `/config`, checks the startup log does not leak the secret,
+then starts it with the bad environment.
+
+## Test the configuration
+
+```sh
+gleam test
+```
+
+[`test/orders_test.gleam`](test/orders_test.gleam) loads the declaration
+from a map with `docuconf.with_env`, without touching the process
+environment, and checks that the committed `contract.cue` is what the
+declaration exports (`docuconf.check_contract`).
 
 ## Export the contract
 
@@ -62,8 +77,9 @@ gleam run -m orders/contract
 ```
 
 This writes `contract.cue` from the declaration
-([`src/orders/contract.gleam`](src/orders/contract.gleam)). Never edit it by
-hand: CI exports it again and fails if it differs from the committed file.
+([`dev/orders/contract.gleam`](dev/orders/contract.gleam); `dev/` keeps it
+out of the production build). Never edit it by hand: `gleam test` fails if
+it differs from what the declaration exports.
 
 ## Deploy
 

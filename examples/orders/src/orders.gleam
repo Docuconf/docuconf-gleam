@@ -1,26 +1,23 @@
 import docuconf
 import gleam/erlang/process
 import gleam/http
-import gleam/io
 import gleam/json
+import gleam/string
 import mist
 import orders/config.{type Config, to_json}
 import wisp.{type Request, type Response}
 import wisp/wisp_mist
 
 pub fn main() -> Nil {
-  // docuconf checks the whole environment before the app starts, and
-  // reports every problem at once, each with a stable code.
-  let config = case docuconf.load(config.spec()) {
-    Ok(config) -> config
-    Error(error) -> {
-      io.println_error(docuconf.describe(error))
-      halt(1)
-    }
-  }
+  // docuconf checks the whole environment before the app starts. On a
+  // problem it prints every one at once, each with a stable code, and
+  // exits with status 1.
+  let config = docuconf.load_or_exit(config.spec())
 
   wisp.configure_logger()
   wisp.set_logger_level(config.log_level)
+  // The secret prints as Secret(//fn() { ... }), never its value.
+  wisp.log_info("config: " <> string.inspect(config))
   let assert Ok(_) =
     wisp_mist.handler(handle(_, config), wisp.random_string(64))
     |> mist.new
@@ -39,6 +36,3 @@ fn handle(req: Request, config: Config) -> Response {
     _, _ -> wisp.not_found()
   }
 }
-
-@external(erlang, "erlang", "halt")
-fn halt(status: Int) -> a

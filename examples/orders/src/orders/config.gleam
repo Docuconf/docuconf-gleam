@@ -1,17 +1,17 @@
 //// The orders service's configuration, declared with docuconf. The same
 //// declaration loads the environment at boot and exports `contract.cue`.
 
-import docuconf
+import docuconf.{type Secret}
 import docuconf/duration.{type Duration}
 import gleam/json.{type Json}
-import gleam/list
+import gleam/result
 import wisp
 
 pub type Config {
   Config(
     port: Int,
     log_level: wisp.LogLevel,
-    database_url: String,
+    database_url: Secret(String),
     allowed_origins: List(String),
     request_timeout: Duration,
     worker_count: Int,
@@ -37,7 +37,8 @@ pub fn spec() -> docuconf.Spec(Config) {
     |> docuconf.default(wisp.InfoLevel),
   )
   // A secret is exported as `secret: true`: the platform supplies it from a
-  // Secret, and docuconf never prints its value.
+  // Secret. docuconf never prints its value, and the app gets a
+  // `docuconf.Secret`, which prints redacted; `docuconf.reveal` reads it.
   use database_url <- docuconf.env(
     docuconf.url("DATABASE_URL", "Primary Postgres connection string")
     |> docuconf.schemes(["postgres"])
@@ -55,8 +56,8 @@ pub fn spec() -> docuconf.Spec(Config) {
   )
   use request_timeout <- docuconf.env(
     docuconf.duration("REQUEST_TIMEOUT", "Timeout for one API request")
-    |> docuconf.min_duration("1s")
-    |> docuconf.max_duration("5m")
+    |> docuconf.min_duration(duration.seconds(1))
+    |> docuconf.max_duration(duration.minutes(5))
     |> docuconf.default(duration.seconds(30)),
   )
   use worker_count <- docuconf.env(
@@ -65,25 +66,30 @@ pub fn spec() -> docuconf.Spec(Config) {
     |> docuconf.max_int(64)
     |> docuconf.default(4),
   )
-  docuconf.succeed(Config(
-    port:,
-    log_level:,
-    database_url:,
-    allowed_origins:,
-    request_timeout:,
-    worker_count:,
-  ))
+  // Each `use` above bound a handle; `build` reads the values once they
+  // have all loaded and passed their checks.
+  use v <- docuconf.build
+  Config(
+    port: port(v),
+    log_level: log_level(v),
+    database_url: database_url(v),
+    allowed_origins: allowed_origins(v),
+    request_timeout: request_timeout(v),
+    worker_count: worker_count(v),
+  )
 }
 
 /// The configuration as JSON, with the secret redacted.
 pub fn to_json(config: Config) -> Json {
-  let level = case list.find(log_levels, fn(l) { l.1 == config.log_level }) {
-    Ok(#(name, _)) -> name
-    Error(Nil) -> "info"
-  }
   json.object([
     #("port", json.int(config.port)),
-    #("log_level", json.string(level)),
+    #(
+      "log_level",
+      json.string(
+        docuconf.enum_name(log_levels, config.log_level)
+        |> result.unwrap("info"),
+      ),
+    ),
     #("database_url", json.string("***")),
     #("allowed_origins", json.array(config.allowed_origins, json.string)),
     #(
