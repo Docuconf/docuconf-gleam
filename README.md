@@ -1,5 +1,7 @@
 # docuconf for Gleam
 
+Documentation: [docuconf.dev](https://docuconf.dev) · [Gleam guide](https://docuconf.dev/languages/gleam/)
+
 Typed configuration contracts for Gleam applications, from the
 [docuconf specification](https://github.com/docuconf/docuconf-go/blob/main/spec/SPEC.md) (v1alpha1).
 
@@ -91,6 +93,8 @@ pub fn spec() -> docuconf.Spec(Config) {
   use database_url <- docuconf.env(
     docuconf.url("DATABASE_URL", "Primary Postgres connection string")
     |> docuconf.schemes(["postgres"])
+    // At most 2048 characters; a longer URL fails the boot with out_of_range.
+    |> docuconf.max_length(2048)
     |> docuconf.secret
     |> docuconf.required,
   )

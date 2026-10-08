@@ -141,5 +141,23 @@ jobs:
           cp contract.cue "$vet/orders/"
           cd "$vet" && cue vet -c ./orders
 
+      - name: Install the docuconf CLI
+        working-directory: docuconf-go/cmd/docuconf
+        run: |
+          go install .
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      # CONFIG.md, CONFIG.agents.md and docs.json are generated from the
+      # committed contract.cue by the docuconf CLI of the pinned docuconf-go;
+      # they must match what it writes today. The re-export above rewrote
+      # contract.cue, and release PRs bump its metadata.generator.version, so
+      # restore the committed file first. These are the README's commands.
+      - name: Generated docs are up to date
+        run: |
+          git checkout -- contract.cue
+          docuconf docs contract.cue --check CONFIG.md
+          docuconf docs contract.cue --format agents --check CONFIG.agents.md
+          docuconf docs contract.cue --format model --check docs.json
+
       - name: Smoke test
         run: ./smoke.sh

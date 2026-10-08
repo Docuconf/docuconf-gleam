@@ -3,7 +3,10 @@ version = "0.1.0"
 description = "Typed configuration contracts for Gleam apps: declare env vars and files, validate them at boot and export a CUE contract."
 licences = ["MIT"]
 repository = { type = "github", user = "docuconf", repo = "docuconf-gleam" }
-links = [{ title = "Specification", href = "https://docuconf.dev" }]
+links = [
+  { title = "Documentation", href = "https://docuconf.dev/languages/gleam/" },
+  { title = "Specification", href = "https://docuconf.dev" },
+]
 gleam = ">= 1.14.0"
 internal_modules = ["docuconf/internal", "docuconf/internal/*"]
 

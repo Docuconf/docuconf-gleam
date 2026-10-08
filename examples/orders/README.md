@@ -17,7 +17,7 @@ builders. That one declaration:
 |---|---|---|
 | `PORT` | int | 1–65535, default `8080` |
 | `LOG_LEVEL` | enum | `debug`, `info`, `warn`, `error`; default `info` |
-| `DATABASE_URL` | url | secret, required, scheme `postgres` |
+| `DATABASE_URL` | url | secret, required, scheme `postgres`, at most 2048 characters |
 | `ALLOWED_ORIGINS` | list of strings (comma-separated) | at least 1 item; default `http://localhost:3000` |
 | `REQUEST_TIMEOUT` | duration (`30s`, `1m30s`) | 1s–5m, default `30s` |
 | `WORKER_COUNT` | int | 1–64, default `4` |
@@ -80,6 +80,26 @@ This writes `contract.cue` from the declaration
 ([`dev/orders/contract.gleam`](dev/orders/contract.gleam); `dev/` keeps it
 out of the production build). Never edit it by hand: `gleam test` fails if
 it differs from what the declaration exports.
+
+## Generated docs
+
+[`CONFIG.md`](CONFIG.md), [`CONFIG.agents.md`](CONFIG.agents.md) and
+[`docs.json`](docs.json) are generated from `contract.cue` by the `docuconf`
+CLI from [docuconf-go](https://github.com/docuconf/docuconf-go); never edit
+them by hand either. The first is the reference for developers, the second
+the rules and facts AI agents need to change the code or set deployment
+values, and the third the docs model both are rendered from. Regenerate them
+after exporting the contract:
+
+```sh
+docuconf docs contract.cue -o CONFIG.md
+docuconf docs contract.cue --format agents -o CONFIG.agents.md
+docuconf docs contract.cue --format model -o docs.json
+```
+
+CI runs the same commands with `--check` and fails when a file is out of
+date. `REQUEST_TIMEOUT` shows where the text comes from: its description is
+the declaration's second argument, and `docuconf.details` adds its details.
 
 ## Deploy
 
