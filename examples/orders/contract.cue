@@ -47,6 +47,7 @@ contract.#Contract & {
 		REQUEST_TIMEOUT: {
 			type: "duration"
 			description: "Timeout for one API request"
+			details: "Raise it when clients upload large order batches. Keep it below the\nload balancer's idle timeout, or the client sees a reset rather than a\n`504`."
 			encoding: "go"
 			min: "1s"
 			max: "5m"

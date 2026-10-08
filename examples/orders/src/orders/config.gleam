@@ -56,6 +56,12 @@ pub fn spec() -> docuconf.Spec(Config) {
   )
   use request_timeout <- docuconf.env(
     docuconf.duration("REQUEST_TIMEOUT", "Timeout for one API request")
+    // Longer docs for `docuconf docs`, in Markdown. Never read at runtime.
+    |> docuconf.details(
+      "Raise it when clients upload large order batches. Keep it below the
+load balancer's idle timeout, or the client sees a reset rather than a
+`504`.",
+    )
     |> docuconf.min_duration(duration.seconds(1))
     |> docuconf.max_duration(duration.minutes(5))
     |> docuconf.default(duration.seconds(30)),
