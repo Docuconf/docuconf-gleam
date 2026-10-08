@@ -105,6 +105,12 @@ pub fn spec() -> docuconf.Spec(Config) {
   )
   use request_timeout <- docuconf.env(
     docuconf.duration("REQUEST_TIMEOUT", "Timeout for one API request")
+    // Longer docs for `docuconf docs`, in Markdown. Never read at runtime.
+    |> docuconf.details(
+      "Raise it when clients upload large order batches. Keep it below the
+load balancer's idle timeout, or the client sees a reset rather than a
+`504`.",
+    )
     |> docuconf.min_duration(duration.seconds(1))
     |> docuconf.max_duration(duration.minutes(5))
     |> docuconf.default(duration.seconds(30)),
@@ -143,6 +149,15 @@ What to know:
 - **Secrets** come back as `docuconf.Secret(String)`. `string.inspect`,
   `echo` and crash reports print it as `Secret(//fn() { ... })`;
   `docuconf.reveal` reads the value. Put `secret` after the constraints.
+- **Descriptions and details.** The second argument of every constructor
+  is the contract's `description`: one line, at least 5 characters.
+  `details` (`file_details` for a file) adds longer CommonMark, at most
+  4000 characters, on why the input exists and when to change it. Gleam
+  cannot read a `///` comment at run time, so details are given
+  explicitly; the declaration fails when a description is missing or
+  details are blank or too long. `docuconf docs` in the
+  [docuconf CLI](https://github.com/docuconf/docuconf-go) generates
+  `CONFIG.md` and `CONFIG.agents.md` from the exported contract.
 - **To decide on a value, declare first, then decide in `build`.** A
   variable used only when a flag is on is declared `optional` (the
   contract lists it), and `build` reads it when the flag is set. A wrong
@@ -330,7 +345,8 @@ this; CI builds it, runs its tests and smoke-tests the running service.
 | `json(name, desc, decoder:, encode:)` | `json` | your own type | `schema`, `max_length` |
 
 Every builder also takes `secret` (the value becomes a `Secret(a)`),
-`group`, `examples`, `config_key`, `deprecated` and `deploy_time_switch`.
+`details`, `group`, `examples`, `config_key`, `deprecated` and
+`deploy_time_switch`.
 Finish each one with `required`, `optional` (a `None` when unset) or
 `default(value)`.
 
@@ -475,7 +491,7 @@ returns `WriteFailed` when it cannot write.
 | `text(name, desc, path:)` | `text` | the content | `text_pattern`, `text_min_length`, `text_max_length` |
 | `binary(name, desc, path:)` | `binary` | path | |
 
-All take `path_env`, `max_size`, `file_group` and `secret_file` (the value
+All take `path_env`, `max_size`, `file_details`, `file_group` and `secret_file` (the value
 becomes a `Secret(a)`), and are finished with `file_required` or
 `file_optional`:
 

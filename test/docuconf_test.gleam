@@ -1379,3 +1379,109 @@ fn docuconf_contract_first_load(env: List(#(String, String))) {
       |> docuconf.without_termination_log,
   )
 }
+
+// ---- description and details (SPEC §4.2, §14.7) --------------------------------
+
+fn documented() {
+  use _ <- docuconf.env(
+    docuconf.int("PORT", "HTTP listen port")
+    |> docuconf.details(
+      "Behind the mesh, keep the default.\n\n- one\n- two\n\n```sh\nPORT=9090\n```",
+    )
+    |> docuconf.default(8080),
+  )
+  use _ <- docuconf.env(
+    docuconf.string("PLAIN", "No details at all") |> docuconf.default("x"),
+  )
+  use _ <- docuconf.file(
+    docuconf.text("license", "Licence key file", path: "/etc/svc/lic/key.txt")
+    |> docuconf.file_details("Issued per customer; rotate it yearly.")
+    |> docuconf.file_optional,
+  )
+  docuconf.succeed(Nil)
+}
+
+pub fn details_are_exported_after_the_description_test() {
+  let assert Ok(cue) = docuconf.contract(documented(), name: "svc")
+  let assert True =
+    string.contains(
+      cue,
+      "\t\tPORT: {\n\t\t\ttype: \"int\"\n\t\t\tdescription: \"HTTP listen port\"\n\t\t\tdetails: \"Behind the mesh, keep the default.\\n\\n- one\\n- two\\n\\n```sh\\nPORT=9090\\n```\"\n",
+    )
+  let assert True =
+    string.contains(cue, "details: \"Issued per customer; rotate it yearly.\"")
+  let assert False = string.contains(cue, "No details at all\"\n\t\t\tdetails")
+  cue_vet(cue)
+}
+
+pub fn details_are_checked_test() {
+  let missing = {
+    use _ <- docuconf.env(docuconf.int("N", "") |> docuconf.default(1))
+    docuconf.succeed(Nil)
+  }
+  let assert [p] = docuconf.check_declaration(missing)
+  let assert True =
+    string.contains(p, "description is required and must be at least 5")
+  let blank = {
+    use _ <- docuconf.env(
+      docuconf.int("N", "Some number")
+      |> docuconf.details(" \n ")
+      |> docuconf.default(1),
+    )
+    docuconf.succeed(Nil)
+  }
+  let assert ["variable N: details must not be blank"] =
+    docuconf.check_declaration(blank)
+  let long = {
+    use _ <- docuconf.file(
+      docuconf.binary("blob", "Some blob", path: "/etc/svc/blob/b.bin")
+      |> docuconf.file_details(string.repeat("日本", 2000) <> "!")
+      |> docuconf.file_optional,
+    )
+    docuconf.succeed(Nil)
+  }
+  let assert [p] = docuconf.check_declaration(long)
+  let assert True =
+    string.contains(p, "details are 4001 characters; at most 4000 are allowed")
+  let most = {
+    use _ <- docuconf.env(
+      docuconf.int("N", "Some number")
+      |> docuconf.details(string.repeat("日本", 2000))
+      |> docuconf.default(1),
+    )
+    docuconf.succeed(Nil)
+  }
+  let assert [] = docuconf.check_declaration(most)
+  let assert Error(docuconf.InvalidDeclaration(_)) =
+    docuconf.contract(blank, name: "svc")
+}
+
+pub fn details_are_not_read_at_runtime_test() {
+  let assert Ok(Nil) =
+    docuconf.load_with(
+      documented(),
+      docuconf.options()
+        |> docuconf.with_env(dict.from_list([#("PORT", "9090")]))
+        |> docuconf.with_file_root(support.temp_dir())
+        |> docuconf.without_termination_log,
+    )
+}
+
+pub fn contract_first_loads_details_test() {
+  let contract =
+    "{\"vars\": {\"PORT\": {\"type\": \"int\", \"description\": \"HTTP listen port\", \"details\": \"Keep it.\\n\\n- a\\n- b\", \"default\": 8080}}}"
+  let assert Ok(values) =
+    contract_first.load(
+      contract,
+      docuconf.options()
+        |> docuconf.with_env(dict.from_list([#("PORT", "1")]))
+        |> docuconf.without_termination_log,
+    )
+  let assert Ok(contract_first.IntValue(1)) = dict.get(values, "PORT")
+  let assert Error(docuconf.InvalidDeclaration([p])) =
+    contract_first.load(
+      "{\"vars\": {\"PORT\": {\"type\": \"int\", \"description\": \"HTTP listen port\", \"details\": \" \"}}}",
+      docuconf.options() |> docuconf.without_termination_log,
+    )
+  let assert True = string.contains(p, "details must not be blank")
+}

@@ -9,6 +9,8 @@ pub type VarMeta {
     name: String,
     type_: String,
     description: String,
+    /// CommonMark for generated docs only (SPEC §4.2); never read at runtime.
+    details: Option(String),
     required: Bool,
     secret: Bool,
     group: Option(String),
@@ -30,6 +32,7 @@ pub type FileMeta {
     type_: String,
     format: Option(String),
     description: String,
+    details: Option(String),
     required: Bool,
     secret: Bool,
     group: Option(String),

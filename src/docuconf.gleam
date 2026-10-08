@@ -324,6 +324,7 @@ fn builder(
       name:,
       type_:,
       description:,
+      details: None,
       required: False,
       secret: False,
       group: None,
@@ -1158,6 +1159,18 @@ pub fn secret(b: VarBuilder(a)) -> VarBuilder(Secret(a)) {
   )
 }
 
+/// Longer documentation for the variable, in CommonMark: why it exists and
+/// when to change it. The description stays a one-line summary; `docuconf
+/// docs` renders both into CONFIG.md and CONFIG.agents.md. Details are for
+/// docs only and never read at runtime. At most 4000 characters (Unicode
+/// code points), and not blank.
+///
+/// Gleam has no way to read a doc comment at run time, so details are
+/// given here rather than taken from `///` comments.
+pub fn details(b: VarBuilder(a), text: String) -> VarBuilder(a) {
+  VarBuilder(..b, meta: VarMeta(..b.meta, details: Some(text)))
+}
+
 /// A group name for docs: related variables are listed together.
 pub fn group(b: VarBuilder(a), group: String) -> VarBuilder(a) {
   VarBuilder(..b, meta: VarMeta(..b.meta, group: Some(group)))
@@ -1489,6 +1502,7 @@ fn file_builder(
       type_:,
       format: None,
       description:,
+      details: None,
       required: False,
       secret: type_ == "tls" || type_ == "keystore",
       group: None,
@@ -1853,6 +1867,12 @@ pub fn path_env(b: FileBuilder(a), name: String) -> FileBuilder(a) {
 /// Upper bound in bytes.
 pub fn max_size(b: FileBuilder(a), bytes: Int) -> FileBuilder(a) {
   FileBuilder(..b, meta: FileMeta(..b.meta, max_size: Some(bytes)))
+}
+
+/// Longer documentation for the file input, in CommonMark, as `details`
+/// is for a variable.
+pub fn file_details(b: FileBuilder(a), text: String) -> FileBuilder(a) {
+  FileBuilder(..b, meta: FileMeta(..b.meta, details: Some(text)))
 }
 
 /// A group name for docs: related inputs are listed together.
@@ -2724,6 +2744,29 @@ pub fn check_declaration(spec: Spec(a)) -> List(String) {
   declaration_problems(metas(spec))
 }
 
+/// The most characters (Unicode code points) details may have (SPEC §4.2).
+const max_details = 4000
+
+fn details_problems(details: Option(String)) -> List(String) {
+  case details {
+    None -> []
+    Some(d) -> {
+      let n = list.length(string.to_utf_codepoints(d))
+      case string.trim(d) == "", n > max_details {
+        True, _ -> ["details must not be blank"]
+        False, True -> [
+          "details are "
+          <> int.to_string(n)
+          <> " characters; at most "
+          <> int.to_string(max_details)
+          <> " are allowed",
+        ]
+        False, False -> []
+      }
+    }
+  }
+}
+
 fn declaration_problems(metas: List(Meta)) -> List(String) {
   let vars =
     list.filter_map(metas, fn(m) {
@@ -2748,6 +2791,7 @@ fn declaration_problems(metas: List(Meta)) -> List(String) {
           string.length(v.description) < 5,
           "description is required and must be at least 5 characters",
         ),
+        details_problems(v.details),
         when(v.secret && v.examples != [], "a secret must not have examples"),
         v.problems,
       ])
@@ -2764,6 +2808,7 @@ fn declaration_problems(metas: List(Meta)) -> List(String) {
           string.length(f.description) < 5,
           "description is required and must be at least 5 characters",
         ),
+        details_problems(f.details),
         when(!abs_path(f.path), "path must be absolute and normalised"),
         case f.path_env {
           Some(e) ->

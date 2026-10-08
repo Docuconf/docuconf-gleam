@@ -308,6 +308,8 @@ fn finish(
   wrap: fn(a) -> Value,
   default_of: fn(Json) -> Result(a, String),
 ) -> Result(Var(Value), String) {
+  // Docs only (SPEC §4.2): checked with the declaration, never read at runtime.
+  use b <- result.try(apply(b, def, "details", text, docuconf.details))
   use secret <- result.try(flag(def, "secret"))
   case secret, list.key_find(def, "default") {
     True, Ok(_) -> Error("a secret must not have a default")
