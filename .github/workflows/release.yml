@@ -67,3 +67,76 @@ jobs:
         env:
           HEXPM_API_KEY: ${{ secrets.HEXPM_API_KEY }}
         run: gleam publish --yes
+
+  # Attaches the Hex package tarball (gleam export hex-tarball) to the GitHub
+  # Release for the tag. GitHub Packages has no Hex registry, so the Release is
+  # the GitHub copy. It runs the same checks as `publish` but does not depend
+  # on it, so it works with only the workflow's GITHUB_TOKEN. See RELEASING.md.
+  github:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write # create the GitHub Release and upload its assets
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: docuconf/docuconf-go
+          path: docuconf-go
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: "27"
+          gleam-version: "1.18.1"
+          rebar3-version: "3"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: false
+      - run: go install cuelang.org/go/cmd/cue@v0.17.1
+
+      - name: Check the tag matches gleam.toml
+        run: |
+          version=$(grep -E '^version = ' gleam.toml | cut -d'"' -f2)
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match gleam.toml version $version" >&2
+            exit 1
+          fi
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+
+      - run: gleam deps download
+      - run: gleam test --target erlang
+        env:
+          DOCUCONF_SPEC_CUE: ${{ github.workspace }}/docuconf-go/spec/cue
+          DOCUCONF_REQUIRE_VET: "1"
+          DOCUCONF_CONFORMANCE: ${{ github.workspace }}/docuconf-go/conformance/cases.json
+          DOCUCONF_REQUIRE_CONFORMANCE: "1"
+      - run: gleam test --target javascript
+        env:
+          DOCUCONF_SPEC_CUE: ${{ github.workspace }}/docuconf-go/spec/cue
+          DOCUCONF_REQUIRE_VET: "1"
+          DOCUCONF_CONFORMANCE: ${{ github.workspace }}/docuconf-go/conformance/cases.json
+          DOCUCONF_REQUIRE_CONFORMANCE: "1"
+
+      - name: Build the Hex package
+        run: |
+          gleam export hex-tarball
+          tarball=$(find build -maxdepth 2 -name "docuconf-$VERSION.tar" | head -n 1)
+          if [ -z "$tarball" ]; then
+            echo "gleam export hex-tarball did not write docuconf-$VERSION.tar under build/" >&2
+            exit 1
+          fi
+          echo "TARBALL=$tarball" >> "$GITHUB_ENV"
+
+      - name: Attach the package to the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
+            flags=()
+            case "$VERSION" in *-*) flags+=(--prerelease) ;; esac
+            gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes --title "docuconf $VERSION" "${flags[@]}"
+          fi
+          gh release upload "$GITHUB_REF_NAME" "$TARBALL" --clobber
