@@ -1,5 +1,7 @@
 # docuconf for Gleam
 
+Documentation: [docuconf.dev](https://docuconf.dev) · [Gleam guide](https://docuconf.dev/languages/gleam/)
+
 Typed configuration contracts for Gleam applications, from the
 [docuconf specification](https://github.com/docuconf/docuconf-go/blob/main/spec/SPEC.md) (v1alpha1).
 
