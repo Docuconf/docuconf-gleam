@@ -91,6 +91,8 @@ pub fn spec() -> docuconf.Spec(Config) {
   use database_url <- docuconf.env(
     docuconf.url("DATABASE_URL", "Primary Postgres connection string")
     |> docuconf.schemes(["postgres"])
+    // At most 2048 characters; a longer URL fails the boot with out_of_range.
+    |> docuconf.max_length(2048)
     |> docuconf.secret
     |> docuconf.required,
   )
