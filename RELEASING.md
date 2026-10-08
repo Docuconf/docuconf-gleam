@@ -25,18 +25,26 @@ on, so code reads `import docuconf` either way.
 
 ## Each release
 
-1. Update `version` in `gleam.toml` and `sdk_version` in
-   `src/docuconf/internal/cue.gleam` (written into every exported contract
-   as `metadata.generator.version`), then regenerate the golden file:
-   `UPDATE_GOLDEN=1 gleam test`.
-2. Commit, tag and push:
-   ```sh
-   git tag v0.1.0
-   git push origin v0.1.0
-   ```
+Releases are automated with
+[release-please](https://github.com/googleapis/release-please); see
+[CONTRIBUTING.md](CONTRIBUTING.md#how-releases-happen) for the commit
+conventions it reads.
+
+1. Merge the open release PR (`chore(main): release X.Y.Z`). It already
+   updates `version` in `gleam.toml`, `sdk_version` in
+   `src/docuconf/internal/cue.gleam` and `CHANGELOG.md`. The golden file and
+   the example contract do not need regenerating: their comparisons ignore
+   `metadata.generator.version`.
+2. release-please tags the merge commit `vX.Y.Z` and creates the GitHub
+   release with the changelog entries.
 3. The workflow checks that the tag matches `gleam.toml`, runs the tests on
    both targets (including `cue vet` against the docuconf-go meta-schema),
    then runs `gleam publish --yes`.
+
+If the release PR was created with `GITHUB_TOKEN` (no release GitHub App
+configured), the tag does not trigger `release.yml` by itself, so
+`.github/workflows/release-please.yml` starts it with `gh workflow run`. To
+redo a release by hand: `gh workflow run release.yml --ref vX.Y.Z`.
 
 `gleam publish --replace` can replace the latest release within Hex's
 grace period. After that, retire a bad release on hex.pm instead.

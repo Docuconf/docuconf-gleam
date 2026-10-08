@@ -127,10 +127,11 @@ jobs:
       # Config tests, and check_contract against the committed contract.cue.
       - run: gleam test
 
+      # Ignores metadata.generator.version, which release PRs bump.
       - name: Re-export the contract and compare
         run: |
           gleam run -m orders/contract
-          git diff --exit-code -- contract.cue
+          ../../scripts/check-generated.sh contract.cue
 
       - name: Vet the contract against the meta-schema
         run: |

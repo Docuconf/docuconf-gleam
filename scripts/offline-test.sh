@@ -68,7 +68,8 @@ if [ -d "$work/vendor/wisp" ] && [ -d "$work/examples/orders" ]; then
   gleam run -m orders/contract
   # UPDATE_GOLDEN=1 also takes the freshly exported contract.
   if [ "${UPDATE_GOLDEN:-}" = "1" ]; then cp contract.cue "$here/examples/orders/contract.cue"; fi
-  diff -u "$here/examples/orders/contract.cue" contract.cue
+  # Ignores metadata.generator.version, which release PRs bump.
+  "$here/scripts/check-generated.sh" --files "$here/examples/orders/contract.cue" contract.cue
   if command -v cue >/dev/null && [ -d "$DOCUCONF_SPEC_CUE" ]; then
     vet=$(mktemp -d "$work/vet.XXXX")
     cp -r "$DOCUCONF_SPEC_CUE/cue.mod" "$DOCUCONF_SPEC_CUE/contract" "$vet/"
