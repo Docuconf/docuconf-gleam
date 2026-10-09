@@ -17,17 +17,26 @@
 //// wire encoding of SPEC §5 is read: `csv`, `json` and `indexed` lists, and
 //// `go`, `iso8601`, `seconds` and `timespan` durations.
 ////
-//// Not covered: file inputs (a contract with `files` is rejected), and
-//// `json` values are not checked against their JSON Schema.
+//// An `int` holds the full 64-bit range on both targets: an `IntValue`, or
+//// on JavaScript, beyond ±(2^53 − 1) where an `Int` is not exact, a
+//// `BigIntValue` with its decimal text. A `json` value is checked against
+//// the variable's `schema` (see "Contract-first mode" in the README): a
+//// value that does not match is `schema_mismatch`, and a schema using a
+//// keyword the validator does not support is a declaration error.
+////
+//// Not covered: file inputs (a contract with `files` is rejected).
 
 import docuconf.{type Secret, type Spec, type Values, type Var, type VarBuilder}
 import docuconf/duration.{type Duration}
+import docuconf/internal/exact_int.{type ExactInt, Big, Small}
+import docuconf/internal/json_schema
 import docuconf/json.{type Json}
 import gleam/dict.{type Dict}
 import gleam/int
 import gleam/list
 import gleam/option.{None, Some}
 import gleam/result
+import gleam/string
 
 /// The typed value of one variable.
 pub type Value {
@@ -35,6 +44,11 @@ pub type Value {
   Absent
   BoolValue(Bool)
   IntValue(Int)
+  /// An `int` beyond ±(2^53 − 1) on the JavaScript target, where an `Int`
+  /// cannot hold it exactly: its decimal text, with no `+` and no leading
+  /// zeros, such as `"9223372036854775807"`. Never produced on Erlang, where
+  /// every 64-bit integer is an `IntValue`. `int_text` reads either.
+  BigIntValue(String)
   FloatValue(Float)
   /// A `string`, `url` or `enum` value.
   StringValue(String)
@@ -47,12 +61,30 @@ pub type Value {
   SecretValue(Secret(Value))
 }
 
+/// The exact decimal text of an `IntValue` or a `BigIntValue` (a secret's
+/// too), on either target.
+pub fn int_text(value: Value) -> Result(String, Nil) {
+  case value {
+    IntValue(i) -> Ok(int.to_string(i))
+    BigIntValue(text) -> Ok(text)
+    SecretValue(s) -> int_text(docuconf.reveal(s))
+    _ -> Error(Nil)
+  }
+}
+
 /// The value as JSON: `null` when absent, a duration in canonical Go form.
+/// On JavaScript a `BigIntValue` becomes the nearest double; read its exact
+/// text with `int_text`.
 pub fn to_json(value: Value) -> Json {
   case value {
     Absent -> json.Null
     BoolValue(b) -> json.Bool(b)
     IntValue(i) -> json.Int(i)
+    // The nearest double: exact text is in int_text.
+    BigIntValue(text) -> {
+      let assert Ok(i) = int.parse(text)
+      json.Int(i)
+    }
     FloatValue(f) -> json.Float(f)
     StringValue(s) -> json.String(s)
     DurationValue(d) -> json.String(duration.to_string(d))
@@ -156,10 +188,10 @@ fn declare(name: String, def: Json) -> Result(Var(Value), String) {
       finish(b, def, StringValue, string_of)
     }
     "int" -> {
-      let b = docuconf.int(name, description)
-      use b <- result.try(apply(b, def, "min", whole, docuconf.min_int))
-      use b <- result.try(apply(b, def, "max", whole, docuconf.max_int))
-      finish(b, def, IntValue, int_of)
+      let b = docuconf.exact_int(name, description)
+      use b <- result.try(apply(b, def, "min", whole, docuconf.exact_min))
+      use b <- result.try(apply(b, def, "max", whole, docuconf.exact_max))
+      finish(b, def, int_value, exact_of)
     }
     "float" -> {
       let b = docuconf.float(name, description)
@@ -199,6 +231,14 @@ fn declare(name: String, def: Json) -> Result(Var(Value), String) {
           j
         })
       use b <- result.try(apply(b, def, "schema", any, docuconf.schema))
+      use b <- result.try(case list.key_find(def, "schema") {
+        Error(Nil) -> Ok(b)
+        Ok(schema) ->
+          case json_schema.problems(schema) {
+            [] -> Ok(docuconf.check_json(b, json_schema.validate(schema, _)))
+            problems -> Error("schema " <> string.join(problems, "; "))
+          }
+      })
       use b <- result.try(apply(b, def, "maxLength", whole, docuconf.max_length))
       finish(b, def, JsonValue, Ok)
     }
@@ -243,13 +283,25 @@ fn declare_list(
     }
     "int" -> {
       use b <- result.try(
-        bounds(docuconf.int_list_with(name, description, encoding:)),
+        bounds(docuconf.exact_int_list_with(name, description, encoding:)),
       )
       use b <- result.try(no_item_lengths(b, def))
-      use b <- result.try(apply(b, def, "itemMin", whole, docuconf.item_min))
-      use b <- result.try(apply(b, def, "itemMax", whole, docuconf.item_max))
-      finish(b, def, fn(l) { ListValue(list.map(l, IntValue)) }, fn(j) {
-        list_of(j, int_of)
+      use b <- result.try(apply(
+        b,
+        def,
+        "itemMin",
+        whole,
+        docuconf.exact_item_min,
+      ))
+      use b <- result.try(apply(
+        b,
+        def,
+        "itemMax",
+        whole,
+        docuconf.exact_item_max,
+      ))
+      finish(b, def, fn(l) { ListValue(list.map(l, int_value)) }, fn(j) {
+        list_of(j, exact_of)
       })
     }
     other -> Error("unknown list items " <> json.quote(other))
@@ -437,6 +489,17 @@ fn int_of(j: Json) -> Result(Int, String) {
   case j {
     json.Int(i) -> Ok(i)
     _ -> Error("must be an integer")
+  }
+}
+
+fn exact_of(j: Json) -> Result(ExactInt, String) {
+  int_of(j) |> result.map(Small)
+}
+
+fn int_value(n: ExactInt) -> Value {
+  case n {
+    Small(i) -> IntValue(i)
+    Big(text) -> BigIntValue(text)
   }
 }
 

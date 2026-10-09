@@ -11,6 +11,20 @@ export function shell(cmd) {
   }
 }
 
+// [`${case id} ${var}`, digits] for every expected value that is an integer
+// beyond ±(2^53 - 1), from the source text: JSON.parse rounds them.
+export function big_expects(text) {
+  const big = (_k, v, ctx) =>
+    typeof v === "number" && !Number.isSafeInteger(v) && /^-?[0-9]+$/.test(ctx?.source ?? "") ? { digits: ctx.source } : v;
+  const out = [];
+  for (const c of JSON.parse(text, big).cases) {
+    for (const [name, v] of Object.entries(c.expect ?? {})) {
+      if (v !== null && typeof v === "object" && typeof v.digits === "string") out.push([`${c.id} ${name}`, v.digits]);
+    }
+  }
+  return toList(out);
+}
+
 export function target() {
   return "javascript";
 }

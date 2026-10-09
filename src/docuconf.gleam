@@ -45,6 +45,7 @@
 
 import docuconf/duration.{type Duration}
 import docuconf/internal/cue
+import docuconf/internal/exact_int.{type ExactInt, Big, Small}
 import docuconf/internal/meta.{
   type FileMeta, type Meta, type VarMeta, FileInput, FileMeta, VarInput, VarMeta,
 }
@@ -601,6 +602,7 @@ pub fn string_list_with(
       }
     },
     json.String,
+    json_decode,
   )
 }
 
@@ -630,6 +632,7 @@ pub fn int_list_with(
         }
       },
       json.Int,
+      json_decode,
     )
   case int_limits() {
     Error(Nil) -> b
@@ -643,6 +646,190 @@ pub fn int_list_with(
   }
 }
 
+// ---- contract-first: exact 64-bit integers ------------------------------------
+//
+// Contract-first mode holds every 64-bit integer exactly, on JavaScript too,
+// where an `Int` is a double: there an integer beyond ±(2^53 − 1) is read
+// as its decimal text (`exact_int.Big`). Bounds stay within the safe range
+// on JavaScript (wider ones are declaration errors), so a `Big` value is
+// compared by its sign. Not part of the public API.
+
+/// An `int` variable whose value is any 64-bit integer, held exactly.
+@internal
+pub fn exact_int(name: String, description: String) -> VarBuilder(ExactInt) {
+  builder(name, "int", description, parse_exact_int, exact_json)
+  // A Small beyond the safe range can only be a default read from JSON on
+  // JavaScript, already rounded.
+  |> add_check(fn(v) { bound(!small_holds(v), outside_safe_range) })
+}
+
+/// A list of 64-bit integers, held exactly; a `json` list is parsed
+/// keeping big integer literals exact.
+@internal
+pub fn exact_int_list_with(
+  name: String,
+  description: String,
+  encoding encoding: ListEncoding,
+) -> VarBuilder(List(ExactInt)) {
+  list_builder(
+    name,
+    description,
+    encoding,
+    "int",
+    parse_exact_int,
+    fn(dyn) {
+      case decode.run(dyn, decode.int), big_literal(dyn) {
+        _, Ok(text) -> parse_exact_int(text)
+        Ok(n), _ ->
+          case int_limits() {
+            // A number JSON.parse could not hold: not an integer literal.
+            Ok(#(lo, hi)) if n < lo || n > hi ->
+              Error(#(OutOfRange, "is outside the 64-bit integer range"))
+            _ -> parse_exact_int(int.to_string(n))
+          }
+        Error(_), _ -> Error(#(InvalidType, "is not an integer"))
+      }
+    },
+    exact_json,
+    json_decode_exact,
+  )
+  |> add_check(fn(l) {
+    each_item(l, fn(v) { bound(!small_holds(v), outside_safe_range) })
+  })
+}
+
+/// `min` for an exact int.
+@internal
+pub fn exact_min(b: VarBuilder(ExactInt), n: Int) -> VarBuilder(ExactInt) {
+  set_field(b, "min", json.Int(n))
+  |> within_limits(n, "min")
+  |> add_check(fn(v) {
+    bound(exact_int.compare(v, n) == order.Lt, "below min " <> int.to_string(n))
+  })
+}
+
+/// `max` for an exact int.
+@internal
+pub fn exact_max(b: VarBuilder(ExactInt), n: Int) -> VarBuilder(ExactInt) {
+  set_field(b, "max", json.Int(n))
+  |> within_limits(n, "max")
+  |> add_check(fn(v) {
+    bound(exact_int.compare(v, n) == order.Gt, "above max " <> int.to_string(n))
+  })
+}
+
+/// `itemMin` for an exact int list.
+@internal
+pub fn exact_item_min(
+  b: VarBuilder(List(ExactInt)),
+  n: Int,
+) -> VarBuilder(List(ExactInt)) {
+  set_field(b, "itemMin", json.Int(n))
+  |> within_limits(n, "itemMin")
+  |> add_check(fn(l) {
+    each_item(l, fn(v) {
+      bound(
+        exact_int.compare(v, n) == order.Lt,
+        "below itemMin " <> int.to_string(n),
+      )
+    })
+  })
+}
+
+/// `itemMax` for an exact int list.
+@internal
+pub fn exact_item_max(
+  b: VarBuilder(List(ExactInt)),
+  n: Int,
+) -> VarBuilder(List(ExactInt)) {
+  set_field(b, "itemMax", json.Int(n))
+  |> within_limits(n, "itemMax")
+  |> add_check(fn(l) {
+    each_item(l, fn(v) {
+      bound(
+        exact_int.compare(v, n) == order.Gt,
+        "above itemMax " <> int.to_string(n),
+      )
+    })
+  })
+}
+
+/// Checks a `json` variable's value with `check` (contract-first mode's
+/// JSON Schema validation); its messages are `schema_mismatch`.
+@internal
+pub fn check_json(
+  b: VarBuilder(a),
+  check: fn(a) -> List(String),
+) -> VarBuilder(a) {
+  add_check(b, fn(v) {
+    case check(v) {
+      [] -> Ok(Nil)
+      problems -> Error(#(SchemaMismatch, string.join(problems, "; ")))
+    }
+  })
+}
+
+fn parse_exact_int(s: String) -> Result(ExactInt, Problem) {
+  let #(negative, body) = case s {
+    "-" <> r -> #(True, r)
+    "+" <> r -> #(False, r)
+    r -> #(False, r)
+  }
+  case all_digits(body) {
+    False -> Error(#(InvalidType, "is not an integer"))
+    True ->
+      case fits_int64(s, body) {
+        False -> Error(#(OutOfRange, "is outside the 64-bit integer range"))
+        True -> {
+          let digits = trim_zeros(body)
+          case int_limits(), exact_int.beyond_safe(digits) {
+            Ok(_), True ->
+              Ok(
+                Big(case negative {
+                  True -> "-" <> digits
+                  False -> digits
+                }),
+              )
+            _, _ -> {
+              let assert Ok(n) = int.parse(string.replace(s, "+", ""))
+              Ok(Small(n))
+            }
+          }
+        }
+      }
+  }
+}
+
+fn small_holds(v: ExactInt) -> Bool {
+  case v, int_limits() {
+    Small(n), Ok(#(lo, hi)) -> n >= lo && n <= hi
+    _, _ -> True
+  }
+}
+
+// A Big value is only ever read from the environment, never written to a
+// contract; its JSON is the nearest double.
+fn exact_json(v: ExactInt) -> Json {
+  case v {
+    Small(n) -> json.Int(n)
+    Big(text) -> {
+      let assert Ok(n) = int.parse(text)
+      json.Int(n)
+    }
+  }
+}
+
+// JSON text decoded keeping integer literals beyond ±(2^53 − 1) exact on
+// JavaScript, as values `big_literal` reads; the same as json_decode on
+// Erlang.
+@external(erlang, "docuconf_ffi", "json_decode")
+@external(javascript, "./docuconf_ffi.mjs", "json_decode_exact")
+fn json_decode_exact(text: String) -> Result(Dynamic, String)
+
+@external(erlang, "docuconf_ffi", "big_literal")
+@external(javascript, "./docuconf_ffi.mjs", "big_literal")
+fn big_literal(value: Dynamic) -> Result(String, Nil)
+
 fn list_builder(
   name: String,
   description: String,
@@ -651,6 +838,7 @@ fn list_builder(
   parse_item: fn(String) -> Result(a, Problem),
   json_item: fn(Dynamic) -> Result(a, Problem),
   encode_item: fn(a) -> Json,
+  decode_array: fn(String) -> Result(Dynamic, String),
 ) -> VarBuilder(List(a)) {
   let parse_all = fn(items: List(b), parse: fn(b) -> Result(a, Problem)) {
     items
@@ -668,7 +856,7 @@ fn list_builder(
       parse_all(string.split(s, separator), parse_item)
     }
     JsonArray -> fn(s) {
-      case json_decode(s) {
+      case decode_array(s) {
         Error(_) -> Error(#(InvalidType, "is not a JSON array"))
         Ok(dyn) ->
           case decode.run(dyn, decode.list(decode.dynamic)) {

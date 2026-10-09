@@ -68,6 +68,31 @@ export function file_exists(path) {
 }
 
 // Integers are exact only within ±(2^53 - 1) on this target.
+// An integer literal beyond ±(2^53 - 1) in JSON text, kept as its source.
+class BigLiteral {
+  constructor(text) {
+    this.text = text;
+  }
+}
+
+export function json_decode_exact(text) {
+  try {
+    return new Ok(
+      JSON.parse(text, (_key, value, context) =>
+        typeof value === "number" && !Number.isSafeInteger(value) && /^-?[0-9]+$/.test(context?.source ?? "")
+          ? new BigLiteral(context.source)
+          : value,
+      ),
+    );
+  } catch (e) {
+    return new Error(e.message);
+  }
+}
+
+export function big_literal(value) {
+  return value instanceof BigLiteral ? new Ok(value.text) : new Error(undefined);
+}
+
 export function int_limits() {
   return new Ok([Number.MIN_SAFE_INTEGER, Number.MAX_SAFE_INTEGER]);
 }

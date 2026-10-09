@@ -651,8 +651,33 @@ let assert Ok(contract_first.IntValue(port)) = dict.get(values, "PORT")
 variable and `SecretValue` for a secret, or the same `InvalidConfig` error
 as `load_with`. `contract_first.spec(json)` returns the declaration
 instead, for `load_with` or `contract`. File inputs are not supported (a
-contract with `files` is rejected), and `json` values are not checked
-against their JSON Schema.
+contract with `files` is rejected).
+
+An `int` holds the full 64-bit range on both targets, as a variable or a
+list item. On Erlang it is always an `IntValue`. On JavaScript, where an
+`Int` is exact only within ±(2^53 − 1), a value beyond that is a
+`BigIntValue` holding its decimal text (no `+`, no leading zeros), such as
+`BigIntValue("9223372036854775807")`; a value beyond 64 bits is
+`out_of_range`. `contract_first.int_text` gives the exact digits of either.
+`min`, `max`, `itemMin` and `itemMax` compare exactly; on JavaScript they
+must be within ±(2^53 − 1), as in a declaration.
+
+A `json` variable with a `schema` is checked against it at load: a value
+that does not match is `schema_mismatch`, with every problem in the message
+(`/perMinute: below minimum 1; /: property perHour is not allowed`). The
+validator is docuconf's own, with JSON Schema draft 2020-12 semantics for
+the keywords SDK-generated schemas use: `type`, `enum`, `const`,
+`properties`, `required`, `additionalProperties`, `items`, `minItems`,
+`maxItems`, `uniqueItems`, `minimum`, `maximum`, `exclusiveMinimum`,
+`exclusiveMaximum`, `multipleOf`, `minLength`, `maxLength`, `pattern`,
+`minProperties`, `maxProperties`, `anyOf`, `oneOf`, `allOf` and `not`, plus
+annotations (`$schema`, `$id`, `$comment`, `title`, `description`,
+`default`, `examples`, `format`, `deprecated`, `readOnly`, `writeOnly`).
+Patterns are RE2 and lengths count code points. A schema with any other
+keyword (`$ref`, `patternProperties`, ...) or a pattern that is not RE2 is
+a declaration error, not silently ignored. A `default` must match the
+schema too. In a declaration, `json` values are still checked by your
+decoder, not by the schema.
 
 ## Config-file overlays
 
@@ -669,7 +694,8 @@ Compared with the specification and the Elixir SDK:
 
 - `reload: watch` is not offered; every file input is `restart`.
 - JSON Schemas are not generated from types (Gleam has no reflection) and
-  are not checked at boot. The decoder is the boot-time check.
+  a declaration's are not checked at boot: the decoder is the boot-time
+  check. Contract-first mode does check `json` values against their schema.
 - No `.env` loading, no profiles (SPEC §4.4).
 
 ## Conformance
@@ -688,12 +714,10 @@ DOCUCONF_CONFORMANCE=../docuconf-go/conformance/cases.json DOCUCONF_REQUIRE_CONF
 DOCUCONF_CONFORMANCE=../docuconf-go/conformance/cases.json DOCUCONF_REQUIRE_CONFORMANCE=1 gleam test --target javascript
 ```
 
-Capability tags skipped:
-
-| Tag | Target | Why |
-|---|---|---|
-| `json-schema` | both | docuconf has no JSON Schema validator; `json` values are checked by your decoder in a declaration, and not at all in contract-first mode. |
-| `int64` | JavaScript only | An `Int` is a double there, exact only within ±(2^53 − 1). The Erlang target runs these cases. |
+Capability tags skipped: none, on either target. A skipped case fails the
+suite. `int64` runs on JavaScript through `BigIntValue`, and `json-schema`
+through contract-first mode's JSON Schema validator (see
+[Contract-first mode](#contract-first-mode)).
 
 ## Development
 

@@ -1,7 +1,10 @@
 -module(docuconf_test_ffi).
--export([shell/1, target/0, read_file/1, remember/1, recall/0]).
+-export([shell/1, target/0, read_file/1, remember/1, recall/0, big_expects/1]).
 
 target() -> <<"erlang">>.
+
+%% Erlang reads every expected integer exactly: none needs its source text.
+big_expects(_) -> [].
 
 %% Runs a shell command; returns {ExitStatus, Output}.
 shell(Cmd) ->

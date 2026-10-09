@@ -1,7 +1,7 @@
 -module(docuconf_ffi).
 -export([regex_compile/1, regex_matches/2, json_decode/1, read_file/1, file_info/1,
          write_file/2, file_exists/1, now_unix/0, print_error/1, pem_certificates/1, pem_count/1,
-         tls_check/7, keystore_verify/3, int_limits/0, exit/1, identity/1]).
+         tls_check/7, keystore_verify/3, int_limits/0, big_literal/1, exit/1, identity/1]).
 
 %% ---- regex (RE2 semantics are prepared on the Gleam side) -------------------
 
@@ -75,6 +75,9 @@ identity(X) -> X.
 file_exists(Path) -> filelib:is_file(Path).
 
 now_unix() -> os:system_time(second).
+
+%% Erlang integers are exact: JSON never needs a big literal.
+big_literal(_) -> {error, nil}.
 
 %% Erlang integers are exact at any size; the 64-bit range is checked on the
 %% Gleam side.

@@ -18,15 +18,18 @@ import gleam/result
 import gleam/string
 import support
 
-/// Capability tags this SDK supports on the current target. `int64` needs
-/// integers beyond 2^53, which the JavaScript target does not hold;
-/// `json-schema` needs a JSON Schema validator, which docuconf lacks.
+/// Capability tags this SDK supports: all of them, on both targets. A
+/// skipped case fails the suite. On JavaScript an `int` beyond ±(2^53 − 1)
+/// is a `BigIntValue` holding its digits.
 fn supported_tags() -> List(String) {
-  case support.target() {
-    "erlang" -> ["int64"]
-    _ -> []
-  }
+  ["int64", "json-schema"]
 }
+
+/// Expected integers beyond ±(2^53 − 1), by "<case id> <var>", as their
+/// source digits. Empty on Erlang, which parses them exactly.
+@external(erlang, "docuconf_test_ffi", "big_expects")
+@external(javascript, "./docuconf_test_ffi.mjs", "big_expects")
+fn big_expects(text: String) -> List(#(String, String))
 
 type Outcome {
   Passed
@@ -53,11 +56,12 @@ fn run(text: String) -> Nil {
   let assert Ok(json.Object(top)) = json.parse(text)
   let assert Ok(json.Array(cases)) = list.key_find(top, "cases")
   let log = support.temp_dir() <> "/termination-log"
+  let bigs = big_expects(text)
   let results =
     list.map(cases, fn(c) {
       let assert json.Object(c) = c
       let assert Ok(json.String(id)) = list.key_find(c, "id")
-      #(id, run_case(c, log))
+      #(id, run_case(c, log, exact_digits(bigs, id)))
     })
   let failed =
     list.filter_map(results, fn(r) {
@@ -100,9 +104,14 @@ fn run(text: String) -> Nil {
     <> int.to_string(list.length(failed))
     <> " failed",
   )
-  case failed {
-    [] -> Nil
-    _ -> {
+  case failed, skipped {
+    [], [] -> Nil
+    [], _ ->
+      panic as {
+        int.to_string(list.length(skipped))
+        <> " conformance cases skipped; every capability tag must be supported"
+      }
+    _, _ -> {
       list.each(failed, fn(f) { io.println("  FAIL " <> f) })
       panic as {
         int.to_string(list.length(failed)) <> " conformance cases failed"
@@ -111,7 +120,24 @@ fn run(text: String) -> Nil {
   }
 }
 
-fn run_case(c: List(#(String, Json)), log: String) -> Outcome {
+/// A case's expected big integers, by variable name.
+fn exact_digits(
+  bigs: List(#(String, String)),
+  id: String,
+) -> List(#(String, String)) {
+  list.filter_map(bigs, fn(b) {
+    case string.split_once(b.0, id <> " ") {
+      Ok(#("", name)) -> Ok(#(name, b.1))
+      _ -> Error(Nil)
+    }
+  })
+}
+
+fn run_case(
+  c: List(#(String, Json)),
+  log: String,
+  digits: List(#(String, String)),
+) -> Outcome {
   let requires = case list.key_find(c, "requires") {
     Ok(json.Array(tags)) ->
       list.filter_map(tags, fn(t) {
@@ -148,7 +174,7 @@ fn run_case(c: List(#(String, Json)), log: String) -> Outcome {
           )
       }
       case list.key_find(c, "expect"), list.key_find(c, "errors") {
-        Ok(json.Object(expect)), _ -> check_expect(loaded, expect)
+        Ok(json.Object(expect)), _ -> check_expect(loaded, expect, digits)
         _, Ok(json.Array(errors)) ->
           check_errors(loaded, errors, secrets(contract, env), log)
         _, _ -> Failed("case has neither expect nor errors")
@@ -160,6 +186,7 @@ fn run_case(c: List(#(String, Json)), log: String) -> Outcome {
 fn check_expect(
   loaded: Result(dict.Dict(String, contract_first.Value), docuconf.Error),
   expect: List(#(String, Json)),
+  digits: List(#(String, String)),
 ) -> Outcome {
   case loaded {
     Error(e) -> Failed("expected success, got " <> docuconf.describe(e))
@@ -167,11 +194,18 @@ fn check_expect(
       let wrong =
         list.filter_map(expect, fn(pair) {
           let #(name, want) = pair
+          let value = dict.get(values, name)
           let got =
-            dict.get(values, name)
+            value
             |> result.map(contract_first.to_json)
             |> result.unwrap(json.String("<not loaded>"))
-          case same(got, want) {
+          // An integer beyond 2^53 compares by its exact digits.
+          let ok = case list.key_find(digits, name) {
+            Ok(want_digits) ->
+              result.try(value, contract_first.int_text) == Ok(want_digits)
+            Error(Nil) -> same(got, want)
+          }
+          case ok {
             True -> Error(Nil)
             False ->
               Ok(
