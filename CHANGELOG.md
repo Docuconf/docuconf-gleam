@@ -4,6 +4,28 @@ All notable changes to docuconf for Gleam are documented here. Entries after 0.1
 [release-please](https://github.com/googleapis/release-please) from Conventional Commit messages; see
 [CONTRIBUTING.md](CONTRIBUTING.md).
 
+## [0.2.0](https://github.com/Docuconf/docuconf-gleam/compare/v0.1.0...v0.2.0) (2026-10-09)
+
+
+### Features
+
+* beta suite (keySet, deprecated rules, strict parsing, files, profiles, overlays) ([2f310b8](https://github.com/Docuconf/docuconf-gleam/commit/2f310b8080438f695b0b96712584f8b6e5da85e1))
+* beta suite (keySet, deprecated rules, strict parsing, files, profiles, overlays) ([d613c56](https://github.com/Docuconf/docuconf-gleam/commit/d613c564116184d3f4ba697acde866317b33d04d))
+* **examples:** dual-key webhook key set with rotation ([444e53d](https://github.com/Docuconf/docuconf-gleam/commit/444e53de69fc903f80d2894f1ce840b75d17da99))
+* **examples:** dual-key webhook key set with rotation ([986b55f](https://github.com/Docuconf/docuconf-gleam/commit/986b55fdbfceb1e268a5a87e17b1b79a067025ec))
+* export description and details from doc comments ([a7c3015](https://github.com/Docuconf/docuconf-gleam/commit/a7c3015c7c03037f715df715216eb88bb35fec99))
+* export description and details from doc comments ([0d1030f](https://github.com/Docuconf/docuconf-gleam/commit/0d1030f640a999c021f56f49a27ec849f9443566))
+* full conformance (no skipped capability tags) ([f6b17b7](https://github.com/Docuconf/docuconf-gleam/commit/f6b17b726399d36700d7ce67955d014a2e109134))
+* full conformance (no skipped capability tags) ([6930261](https://github.com/Docuconf/docuconf-gleam/commit/6930261f3ac85fbeab9e25110203a7109318edc4))
+* maxLength on url/json and item length limits on string lists ([fe963a4](https://github.com/Docuconf/docuconf-gleam/commit/fe963a47b33d51ec8ac6f90df1bb7da8febc7ae0))
+* maxLength on url/json and item length limits on string lists ([c54bf98](https://github.com/Docuconf/docuconf-gleam/commit/c54bf986bc143554d0739a69d17ea81c2e77c6e5))
+
+
+### Documentation
+
+* **examples:** length limits and generated CONFIG docs ([1439699](https://github.com/Docuconf/docuconf-gleam/commit/14396994978d3846e9dc0abc021e63cca96c360f))
+* link docuconf.dev ([5ffb24a](https://github.com/Docuconf/docuconf-gleam/commit/5ffb24a7b24a91eb9d90d04821c33c5187e1b887))
+
 ## 0.1.0
 
 First version: typed configuration contracts for Gleam applications on the Erlang and JavaScript targets,
