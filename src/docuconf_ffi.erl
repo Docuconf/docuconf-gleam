@@ -1,7 +1,8 @@
 -module(docuconf_ffi).
 -export([regex_compile/1, regex_matches/2, json_decode/1, read_file/1, file_info/1,
          write_file/2, file_exists/1, now_unix/0, print_error/1, pem_certificates/1, pem_count/1,
-         tls_check/7, keystore_verify/3, int_limits/0, big_literal/1, exit/1, identity/1]).
+         tls_check/7, keystore_verify/3, int_limits/0, big_literal/1, exit/1, identity/1,
+         secure_equal/2, cell_new/1, cell_update/2, monotonic_ms/0, file_stamp/1]).
 
 %% ---- regex (RE2 semantics are prepared on the Gleam side) -------------------
 
@@ -72,6 +73,11 @@ exit(Status) -> erlang:halt(Status).
 
 identity(X) -> X.
 
+%% Constant-time comparison: the SHA-256 digests have the same size whatever
+%% the inputs, and crypto:hash_equals compares them in constant time.
+secure_equal(A, B) ->
+    crypto:hash_equals(crypto:hash(sha256, A), crypto:hash(sha256, B)).
+
 file_exists(Path) -> filelib:is_file(Path).
 
 now_unix() -> os:system_time(second).
@@ -86,6 +92,40 @@ int_limits() -> {error, nil}.
 print_error(Msg) ->
     io:put_chars(standard_error, [Msg, $\n]),
     nil.
+
+%% ---- reload: watch ----------------------------------------------------------
+
+%% A cell is a process holding a value, so every process of the app sees
+%% the same current content, and updates run one at a time.
+cell_new(Value) -> spawn(fun() -> cell_loop(Value) end).
+
+cell_loop(Value) ->
+    receive
+        {update, From, Tag, F} ->
+            New = try F(Value) catch _:_ -> Value end,
+            From ! {Tag, New},
+            cell_loop(New)
+    end.
+
+cell_update(Cell, F) ->
+    Tag = make_ref(),
+    Mon = erlang:monitor(process, Cell),
+    Cell ! {update, self(), Tag, F},
+    receive
+        {Tag, Value} -> erlang:demonitor(Mon, [flush]), Value;
+        {'DOWN', Mon, process, _, Reason} -> erlang:error({docuconf_watch_cell_down, Reason})
+    end.
+
+monotonic_ms() -> erlang:monotonic_time(millisecond).
+
+%% Follows symlinks (read_file_info does), so a swapped symlink is a change.
+file_stamp(Path) ->
+    case file:read_file_info(Path, [{time, posix}]) of
+        {ok, Info} ->
+            unicode:characters_to_binary(io_lib:format("~p:~p:~p",
+                [element(2, Info), element(6, Info), element(12, Info)]));
+        {error, _} -> <<"absent">>
+    end.
 
 %% ---- certificates -----------------------------------------------------------
 
@@ -111,7 +151,8 @@ parses(Der) ->
 %% Returns a list of {Code, Message}. CaPem is <<>> when requireCA is unset.
 tls_check(CertPem, KeyPem, CaPem, DnsNames, KeyAlgs, MinRemaining, Now) ->
     case pem_certificates(CertPem) of
-        {0, _} -> [{<<"certificate_invalid">>, <<"tls.crt holds no PEM certificate">>}];
+        %% SPEC §11.2 item 5: no PEM at all is file_malformed.
+        {0, _} -> [{<<"file_malformed">>, <<"tls.crt holds no PEM certificate">>}];
         {N, Good} when length(Good) < N ->
             [{<<"certificate_invalid">>, <<"tls.crt holds a certificate that cannot be parsed">>}];
         {_, [Leaf | _] = Chain} ->
@@ -135,7 +176,7 @@ key_check(KeyPem, Otp) ->
                 false -> [{<<"key_mismatch">>, <<"tls.key does not match the certificate in tls.crt">>}]
             end;
         [_ | _] -> [{<<"certificate_invalid">>, <<"tls.key is encrypted">>}];
-        [] -> [{<<"certificate_invalid">>, <<"tls.key holds no PEM private key">>}]
+        [] -> [{<<"file_malformed">>, <<"tls.key holds no PEM private key">>}]
     catch
         _:_ -> [{<<"certificate_invalid">>, <<"tls.key is not a readable PEM private key">>}]
     end.

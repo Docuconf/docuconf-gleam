@@ -35,17 +35,17 @@ fn sign(key: String) -> String {
 }
 
 // WEBHOOK_KEYS as the service loads it at boot.
-fn keys(value: String) -> List(String) {
+fn keys(value: String) -> docuconf.KeySet {
   let assert Ok(config) =
     load([
       #("DATABASE_URL", "postgres://u:p@db/orders"),
       #("WEBHOOK_KEYS", value),
     ])
   let assert option.Some(keys) = config.webhook_keys
-  docuconf.reveal(keys)
+  keys
 }
 
-fn accepts(keys: List(String), key: String) -> Bool {
+fn accepts(keys: docuconf.KeySet, key: String) -> Bool {
   webhook.verify(keys, bit_array.from_string(body), sign(key))
 }
 
@@ -64,13 +64,20 @@ pub fn rotation_test() {
   assert accepts(ks, new_key)
 }
 
+pub fn keys_are_in_order_and_redacted_test() {
+  let ks = keys(old_key <> "," <> new_key)
+  assert docuconf.keys(ks) == [old_key, new_key]
+  assert docuconf.contains(ks, new_key)
+  assert !docuconf.contains(ks, string.repeat("x", 32))
+  assert !string.contains(string.inspect(ks), old_key)
+}
+
 pub fn bad_signature_test() {
   let ks = keys(old_key)
   assert !webhook.verify(ks, bit_array.from_string(body), "")
   assert !webhook.verify(ks, bit_array.from_string(body), "not hex")
   assert !accepts(ks, string.repeat("x", 32))
   assert !webhook.verify(ks, bit_array.from_string(body <> " "), sign(old_key))
-  assert !webhook.verify([], bit_array.from_string(body), sign(old_key))
 }
 
 pub fn webhook_keys_are_optional_test() {
@@ -88,6 +95,8 @@ pub fn bad_key_sets_test() {
       old_key <> "," <> new_key <> "," <> string.repeat("x", 32),
       docuconf.TooManyItems,
     ),
+    // A lone comma: two empty keys.
+    #(",", docuconf.OutOfRange),
   ]
   |> list.each(fn(c) {
     let #(value, code) = c

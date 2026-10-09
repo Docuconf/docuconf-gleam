@@ -42,16 +42,17 @@ fn handle(req: Request, config: Config) -> Response {
   }
 }
 
-// Payment webhooks, signed with any key in WEBHOOK_KEYS (see config.gleam
-// for how to rotate it).
+// Payment webhooks, signed with any key in WEBHOOK_KEYS (see the README for
+// how to rotate it).
 fn payment(req: Request, config: Config) -> Response {
   use body <- wisp.require_bit_array_body(req)
-  let keys = case config.webhook_keys {
-    option.Some(keys) -> docuconf.reveal(keys)
-    option.None -> []
-  }
   let signature = request.get_header(req, "x-signature") |> result.unwrap("")
-  case webhook.verify(keys, body, signature) {
+  let verified = case config.webhook_keys {
+    option.Some(keys) -> webhook.verify(keys, body, signature)
+    // No keys: every webhook is rejected.
+    option.None -> False
+  }
+  case verified {
     True -> wisp.no_content()
     False -> wisp.response(401) |> wisp.string_body("bad signature")
   }
