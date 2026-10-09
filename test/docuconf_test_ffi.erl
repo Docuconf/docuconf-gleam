@@ -1,7 +1,11 @@
 -module(docuconf_test_ffi).
--export([shell/1, target/0, read_file/1, remember/1, recall/0]).
+-export([shell/1, target/0, read_file/1, remember/1, recall/0, big_expects/1,
+         write_bytes/2]).
 
 target() -> <<"erlang">>.
+
+%% Erlang reads every expected integer exactly: none needs its source text.
+big_expects(_) -> [].
 
 %% Runs a shell command; returns {ExitStatus, Output}.
 shell(Cmd) ->
@@ -36,3 +40,9 @@ recall_raw() ->
         undefined -> [];
         L -> L
     end.
+
+%% Writes bytes to a file, creating its directory.
+write_bytes(Path, Bin) ->
+    ok = filelib:ensure_dir(Path),
+    ok = file:write_file(Path, Bin),
+    nil.

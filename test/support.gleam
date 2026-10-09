@@ -17,6 +17,11 @@ pub fn target() -> String
 @external(javascript, "./docuconf_test_ffi.mjs", "read_file")
 pub fn read_file(path: String) -> Result(String, Nil)
 
+/// Writes bytes to a file, creating its directory.
+@external(erlang, "docuconf_test_ffi", "write_bytes")
+@external(javascript, "./docuconf_test_ffi.mjs", "write_bytes")
+pub fn write_bytes(path: String, bytes: BitArray) -> Nil
+
 /// Keeps a string, for a callback to report what it saw.
 @external(erlang, "docuconf_test_ffi", "remember")
 @external(javascript, "./docuconf_test_ffi.mjs", "remember")

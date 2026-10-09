@@ -82,7 +82,7 @@ status=0
 DATABASE_URL=$secret WEBHOOK_KEYS="$old_key," "$app" run >"$log" 2>&1 || status=$?
 [ "$status" -ne 0 ] || fail "the service started with an empty webhook key"
 grep -q '^docuconf: 1 configuration problem:$' "$log" || fail "no problem count for an empty webhook key"
-grep -q 'WEBHOOK_KEYS \[out_of_range\]' "$log" || fail "no WEBHOOK_KEYS out_of_range"
+grep -q 'WEBHOOK_KEYS \[out_of_range\]: key 2 is empty' "$log" || fail "no WEBHOOK_KEYS out_of_range for key 2"
 if grep -q webhook-key "$log"; then fail "the startup output leaks a webhook key"; fi
 echo "smoke: empty webhook key -> exit $status"
 sed 's/^/  /' "$log"

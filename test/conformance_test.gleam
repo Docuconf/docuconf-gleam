@@ -4,11 +4,19 @@
 //// cases.json is found through DOCUCONF_CONFORMANCE, else
 //// ../docuconf-go/conformance/cases.json. When it is missing the suite is
 //// skipped, unless DOCUCONF_REQUIRE_CONFORMANCE=1.
+////
+//// Each case runs in a new, empty directory: its files are written there at
+//// their paths, and the case's env plus DOCUCONF_FILE_ROOT=<dir> is the
+//// whole environment (no process environment, no termination log of the
+//// machine's). A case whose `requires` holds a tag this SDK does not list in
+//// `supported_tags` is skipped, never run, and a skipped case fails the
+//// suite.
 
 import docuconf
 import docuconf/contract_first
 import docuconf/json.{type Json}
 import envoy
+import gleam/bit_array
 import gleam/dict
 import gleam/int
 import gleam/io
@@ -18,15 +26,23 @@ import gleam/result
 import gleam/string
 import support
 
-/// Capability tags this SDK supports on the current target. `int64` needs
-/// integers beyond 2^53, which the JavaScript target does not hold;
-/// `json-schema` needs a JSON Schema validator, which docuconf lacks.
+/// The capability tags this SDK supports (an allow-list, SPEC §12): all of
+/// them, on both targets. A tag not listed here, such as one added to the
+/// suite after this runner was written, skips its cases rather than running
+/// them, and a skipped case fails the suite. On JavaScript an `int` beyond
+/// ±(2^53 − 1) is a `BigIntValue` holding its digits.
 fn supported_tags() -> List(String) {
-  case support.target() {
-    "erlang" -> ["int64"]
-    _ -> []
-  }
+  [
+    "int64", "json-schema", "key-set", "deprecated", "strict-parsing", "files",
+    "profiles", "overlays",
+  ]
 }
+
+/// Expected integers beyond ±(2^53 − 1), by "<case id> <var>", as their
+/// source digits. Empty on Erlang, which parses them exactly.
+@external(erlang, "docuconf_test_ffi", "big_expects")
+@external(javascript, "./docuconf_test_ffi.mjs", "big_expects")
+fn big_expects(text: String) -> List(#(String, String))
 
 type Outcome {
   Passed
@@ -53,11 +69,12 @@ fn run(text: String) -> Nil {
   let assert Ok(json.Object(top)) = json.parse(text)
   let assert Ok(json.Array(cases)) = list.key_find(top, "cases")
   let log = support.temp_dir() <> "/termination-log"
+  let bigs = big_expects(text)
   let results =
     list.map(cases, fn(c) {
       let assert json.Object(c) = c
       let assert Ok(json.String(id)) = list.key_find(c, "id")
-      #(id, run_case(c, log))
+      #(id, run_case(c, log, exact_digits(bigs, id)))
     })
   let failed =
     list.filter_map(results, fn(r) {
@@ -100,9 +117,14 @@ fn run(text: String) -> Nil {
     <> int.to_string(list.length(failed))
     <> " failed",
   )
-  case failed {
-    [] -> Nil
-    _ -> {
+  case failed, skipped {
+    [], [] -> Nil
+    [], _ ->
+      panic as {
+        int.to_string(list.length(skipped))
+        <> " conformance cases skipped; every capability tag must be supported"
+      }
+    _, _ -> {
       list.each(failed, fn(f) { io.println("  FAIL " <> f) })
       panic as {
         int.to_string(list.length(failed)) <> " conformance cases failed"
@@ -111,7 +133,24 @@ fn run(text: String) -> Nil {
   }
 }
 
-fn run_case(c: List(#(String, Json)), log: String) -> Outcome {
+/// A case's expected big integers, by variable name.
+fn exact_digits(
+  bigs: List(#(String, String)),
+  id: String,
+) -> List(#(String, String)) {
+  list.filter_map(bigs, fn(b) {
+    case string.split_once(b.0, id <> " ") {
+      Ok(#("", name)) -> Ok(#(name, b.1))
+      _ -> Error(Nil)
+    }
+  })
+}
+
+fn run_case(
+  c: List(#(String, Json)),
+  log: String,
+  digits: List(#(String, String)),
+) -> Outcome {
   let requires = case list.key_find(c, "requires") {
     Ok(json.Array(tags)) ->
       list.filter_map(tags, fn(t) {
@@ -137,29 +176,64 @@ fn run_case(c: List(#(String, Json)), log: String) -> Outcome {
         _ -> []
       }
       let _ = support.shell("rm -f '" <> log <> "'")
-      let loaded = case contract_first.spec(contract) {
-        Error(e) -> Error(e)
-        Ok(spec) ->
-          docuconf.load_with(
-            spec,
-            docuconf.options()
-              |> docuconf.with_env(dict.from_list(env))
-              |> docuconf.with_termination_log(log),
-          )
-      }
-      case list.key_find(c, "expect"), list.key_find(c, "errors") {
-        Ok(json.Object(expect)), _ -> check_expect(loaded, expect)
+      let root = support.temp_dir()
+      write_files(c, root)
+      let _ = support.recall()
+      let loaded =
+        contract_first.load_json(
+          contract,
+          docuconf.options()
+            |> docuconf.with_env(
+              dict.from_list([#("DOCUCONF_FILE_ROOT", root), ..env]),
+            )
+            |> docuconf.with_termination_log(log)
+            |> docuconf.on_warning(support.remember),
+        )
+      let warnings = string.join(support.recall(), "\n")
+      let _ = support.shell("rm -rf '" <> root <> "'")
+      let secret_values = secrets(contract, env)
+      let outcome = case
+        list.key_find(c, "expect"),
+        list.key_find(c, "errors")
+      {
+        Ok(json.Object(expect)), _ -> check_expect(loaded, expect, digits)
         _, Ok(json.Array(errors)) ->
-          check_errors(loaded, errors, secrets(contract, env), log)
+          check_errors(loaded, errors, secret_values, log)
         _, _ -> Failed("case has neither expect nor errors")
       }
+      case outcome, list.any(secret_values, string.contains(warnings, _)) {
+        Passed, True -> Failed("a secret value appears in a boot warning")
+        _, _ -> outcome
+      }
     }
+  }
+}
+
+/// Writes the case's files under root, at their paths: `{"text": ...}` as
+/// UTF-8, `{"base64": ...}` decoded.
+fn write_files(c: List(#(String, Json)), root: String) -> Nil {
+  case list.key_find(c, "files") {
+    Ok(json.Object(files)) ->
+      list.each(files, fn(f) {
+        let bytes = case f.1 {
+          json.String(text) | json.Object([#("text", json.String(text))]) ->
+            bit_array.from_string(text)
+          json.Object([#("base64", json.String(b64))]) -> {
+            let assert Ok(bytes) = bit_array.base64_decode(b64)
+            bytes
+          }
+          other -> panic as { "unknown file content " <> json.to_string(other) }
+        }
+        support.write_bytes(root <> f.0, bytes)
+      })
+    _ -> Nil
   }
 }
 
 fn check_expect(
   loaded: Result(dict.Dict(String, contract_first.Value), docuconf.Error),
   expect: List(#(String, Json)),
+  digits: List(#(String, String)),
 ) -> Outcome {
   case loaded {
     Error(e) -> Failed("expected success, got " <> docuconf.describe(e))
@@ -167,11 +241,18 @@ fn check_expect(
       let wrong =
         list.filter_map(expect, fn(pair) {
           let #(name, want) = pair
+          let value = dict.get(values, name)
           let got =
-            dict.get(values, name)
+            value
             |> result.map(contract_first.to_json)
             |> result.unwrap(json.String("<not loaded>"))
-          case same(got, want) {
+          // An integer beyond 2^53 compares by its exact digits.
+          let ok = case list.key_find(digits, name) {
+            Ok(want_digits) ->
+              result.try(value, contract_first.int_text) == Ok(want_digits)
+            Error(Nil) -> same(got, want)
+          }
+          case ok {
             True -> Error(Nil)
             False ->
               Ok(

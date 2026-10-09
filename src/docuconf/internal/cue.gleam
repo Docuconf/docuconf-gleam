@@ -100,9 +100,7 @@ fn var_fields(v: VarMeta) -> List(#(String, Json)) {
       True -> []
       False -> some(v.default, "default", fn(d) { d })
     },
-    some(v.deprecated, "deprecated", fn(m) {
-      json.Object([#("message", json.String(m))])
-    }),
+    deprecation(v.deprecated, v.replaced_by),
   ])
 }
 
@@ -117,9 +115,23 @@ fn file_fields(f: FileMeta) -> List(#(String, Json)) {
     some(f.group, "group", json.String),
     [#("path", json.String(f.path))],
     some(f.path_env, "pathEnv", json.String),
+    some(f.reload, "reload", json.String),
     some(f.max_size, "maxSize", json.Int),
+    deprecation(f.deprecated, f.replaced_by),
     f.fields,
   ])
+}
+
+fn deprecation(
+  message: option.Option(String),
+  replaced_by: option.Option(String),
+) -> List(#(String, Json)) {
+  some(message, "deprecated", fn(m) {
+    json.Object([
+      #("message", json.String(m)),
+      ..some(replaced_by, "replacedBy", json.String)
+    ])
+  })
 }
 
 fn tabs(n: Int) -> String {

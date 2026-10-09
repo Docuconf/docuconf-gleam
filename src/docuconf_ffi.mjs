@@ -55,6 +55,38 @@ export function exit(status) {
   process.exit(status);
 }
 
+// Constant-time comparison through SHA-256 digests, which have the same
+// length whatever the inputs.
+export function secure_equal(a, b) {
+  const digest = (s) => crypto.createHash("sha256").update(s, "utf8").digest();
+  return crypto.timingSafeEqual(digest(a), digest(b));
+}
+
+// reload: watch. A cell is a mutable box: JavaScript runs one update at a
+// time anyway.
+export function cell_new(value) {
+  return { value };
+}
+
+export function cell_update(cell, f) {
+  cell.value = f(cell.value);
+  return cell.value;
+}
+
+export function monotonic_ms() {
+  return Math.floor(performance.now());
+}
+
+// Follows symlinks (statSync does), so a swapped symlink is a change.
+export function file_stamp(path) {
+  try {
+    const st = fs.statSync(path);
+    return `${st.size}:${st.mtimeMs}:${st.ino}`;
+  } catch {
+    return "absent";
+  }
+}
+
 export function identity(x) {
   return x;
 }
@@ -68,6 +100,31 @@ export function file_exists(path) {
 }
 
 // Integers are exact only within ±(2^53 - 1) on this target.
+// An integer literal beyond ±(2^53 - 1) in JSON text, kept as its source.
+class BigLiteral {
+  constructor(text) {
+    this.text = text;
+  }
+}
+
+export function json_decode_exact(text) {
+  try {
+    return new Ok(
+      JSON.parse(text, (_key, value, context) =>
+        typeof value === "number" && !Number.isSafeInteger(value) && /^-?[0-9]+$/.test(context?.source ?? "")
+          ? new BigLiteral(context.source)
+          : value,
+      ),
+    );
+  } catch (e) {
+    return new Error(e.message);
+  }
+}
+
+export function big_literal(value) {
+  return value instanceof BigLiteral ? new Ok(value.text) : new Error(undefined);
+}
+
 export function int_limits() {
   return new Ok([Number.MIN_SAFE_INTEGER, Number.MAX_SAFE_INTEGER]);
 }
@@ -105,7 +162,8 @@ export function tls_check(certPem, keyPem, caPem, dnsNames, keyAlgs, minRemainin
   const fail = (code, msg) => out.push([code, msg]);
   const blocks = pemBlocks(certPem);
   if (blocks.length === 0) {
-    fail("certificate_invalid", "tls.crt holds no PEM certificate");
+    // SPEC §11.2 item 5: no PEM at all is file_malformed.
+    fail("file_malformed", "tls.crt holds no PEM certificate");
     return toList(out);
   }
   const chain = blocks.map(parse);
@@ -114,7 +172,9 @@ export function tls_check(certPem, keyPem, caPem, dnsNames, keyAlgs, minRemainin
     return toList(out);
   }
   const leaf = chain[0];
-  try {
+  if (!/-----BEGIN [A-Z ]*PRIVATE KEY-----/.test(keyPem)) {
+    fail("file_malformed", "tls.key holds no PEM private key");
+  } else try {
     const key = crypto.createPrivateKey(keyPem);
     if (!leaf.checkPrivateKey(key)) fail("key_mismatch", "tls.key does not match the certificate in tls.crt");
   } catch {
