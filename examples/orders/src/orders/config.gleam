@@ -4,6 +4,7 @@
 import docuconf.{type Secret}
 import docuconf/duration.{type Duration}
 import gleam/json.{type Json}
+import gleam/option.{type Option}
 import gleam/result
 import wisp
 
@@ -15,6 +16,7 @@ pub type Config {
     allowed_origins: List(String),
     request_timeout: Duration,
     worker_count: Int,
+    webhook_keys: Option(Secret(List(String))),
   )
 }
 
@@ -74,6 +76,30 @@ load balancer's idle timeout, or the client sees a reset rather than a
     |> docuconf.max_int(64)
     |> docuconf.default(4),
   )
+  // A key set (SPEC §6.1): a secret list of one or two keys, so a key can be
+  // rotated with an overlap in which both are valid.
+  use webhook_keys <- docuconf.env(
+    docuconf.string_list(
+      "WEBHOOK_KEYS",
+      "Keys that verify the signature on incoming payment webhooks",
+      separator: ",",
+    )
+    |> docuconf.details(
+      "A webhook is accepted when it is signed with any key in the list, so the key can be rotated without turning webhooks away. To rotate:
+
+ 1. add the new key as the second item, and roll out;
+ 2. switch the sender to the new key;
+ 3. remove the old key, and roll out.
+
+Each key is 32 to 256 characters, so an empty or truncated key fails at boot. Without this variable, the service rejects every webhook.",
+    )
+    |> docuconf.min_items(1)
+    |> docuconf.max_items(2)
+    |> docuconf.item_min_length(32)
+    |> docuconf.item_max_length(256)
+    |> docuconf.secret
+    |> docuconf.optional,
+  )
   // Each `use` above bound a handle; `build` reads the values once they
   // have all loaded and passed their checks.
   use v <- docuconf.build
@@ -84,10 +110,11 @@ load balancer's idle timeout, or the client sees a reset rather than a
     allowed_origins: allowed_origins(v),
     request_timeout: request_timeout(v),
     worker_count: worker_count(v),
+    webhook_keys: webhook_keys(v),
   )
 }
 
-/// The configuration as JSON, with the secret redacted.
+/// The configuration as JSON, with the secrets redacted, set or not.
 pub fn to_json(config: Config) -> Json {
   json.object([
     #("port", json.int(config.port)),
@@ -105,5 +132,6 @@ pub fn to_json(config: Config) -> Json {
       json.string(duration.to_string(config.request_timeout)),
     ),
     #("worker_count", json.int(config.worker_count)),
+    #("webhook_keys", json.string("***")),
   ])
 }
