@@ -50,6 +50,8 @@ import docuconf/internal/meta.{
   type FileMeta, type Meta, type VarMeta, FileInput, FileMeta, VarInput, VarMeta,
 }
 import docuconf/internal/re2
+import docuconf/internal/toml
+import docuconf/internal/yaml
 import docuconf/json.{type Json}
 import envoy
 import gleam/bit_array
@@ -117,6 +119,7 @@ fn code_from_string(s: String) -> Code {
     "key_mismatch" -> KeyMismatch
     "certificate_expiring" -> CertificateExpiring
     "certificate_name_mismatch" -> CertificateNameMismatch
+    "file_malformed" -> FileMalformed
     _ -> CertificateInvalid
   }
 }
@@ -332,6 +335,7 @@ fn builder(
       examples: [],
       config_key: None,
       deprecated: None,
+      replaced_by: None,
       fields: [],
       default: None,
       flag_warning: True,
@@ -349,7 +353,8 @@ pub fn string(name: String, description: String) -> VarBuilder(String) {
   builder(name, "string", description, Ok, json.String)
 }
 
-/// A 64-bit integer, base 10.
+/// A 64-bit integer, written `^[+-]?[0-9]+$` and read as base 10: `007` is 7,
+/// and `0x10`, `1_000` and `1e3` are `invalid_type` (SPEC §5).
 ///
 /// On the JavaScript target an `Int` is a number, exact only within
 /// ±(2^53 − 1). There the variable always exports `min` and `max` within
@@ -387,12 +392,15 @@ fn within_limits(b: VarBuilder(a), n: Int, what: String) -> VarBuilder(a) {
   }
 }
 
-/// A finite decimal number; NaN and infinities are rejected.
+/// A finite decimal number, written `^[+-]?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$`
+/// (SPEC §5): `.5`, `5.`, hex floats, `inf`, `NaN` and values too large for a
+/// double are `invalid_type`.
 pub fn float(name: String, description: String) -> VarBuilder(Float) {
   builder(name, "float", description, parse_float, json.Float)
 }
 
-/// `true` or `false`, case-insensitive.
+/// `true` or `false`, in any case (`TRUE`, `False`), and nothing else: not
+/// `1`, `yes` or `on` (SPEC §5).
 pub fn bool(name: String, description: String) -> VarBuilder(Bool) {
   builder(
     name,
@@ -867,10 +875,14 @@ fn list_builder(
     }
     Indexed -> fn(s) { parse_all([s], parse_item) }
   }
+  // Indexed items, and the items of a list from a config-file overlay.
   let b =
-    builder(name, "list", description, parse, fn(l) {
-      json.array(l, encode_item)
-    })
+    VarBuilder(
+      ..builder(name, "list", description, parse, fn(l) {
+        json.array(l, encode_item)
+      }),
+      parse_items: Some(fn(items) { parse_all(items, parse_item) }),
+    )
     |> set_field("items", json.String(items))
   case encoding {
     Csv(separator) -> {
@@ -884,11 +896,7 @@ fn list_builder(
       }
     }
     JsonArray -> set_field(b, "encoding", json.String("json"))
-    Indexed ->
-      VarBuilder(
-        ..set_field(b, "encoding", json.String("indexed")),
-        parse_items: Some(fn(items) { parse_all(items, parse_item) }),
-      )
+    Indexed -> set_field(b, "encoding", json.String("indexed"))
   }
 }
 
@@ -922,6 +930,272 @@ pub fn json(
     },
     encode,
   )
+}
+
+// ---- key sets -----------------------------------------------------------------
+
+/// The keys of a `keySet` variable (SPEC §4.3, §6.1): secret keys that are
+/// all valid at once, so one can be rotated without an outage. Read them
+/// with `keys`, check a candidate with `contains`, or run your own check
+/// (an HMAC comparison) against every key with `any_key`.
+///
+/// A key set is always secret: it prints as `KeySet(//fn() { ... })` with
+/// `string.inspect` and `echo`, and no error message holds a key. Two key
+/// sets never compare equal with `==`; compare what `keys` returns.
+pub opaque type KeySet {
+  // Held in a closure, as a Secret is: printers show a function.
+  KeySet(fn() -> List(String))
+}
+
+/// The keys, in the order the platform gave them.
+pub fn keys(set: KeySet) -> List(String) {
+  let KeySet(keys) = set
+  keys()
+}
+
+/// Whether `candidate` is one of the keys, in constant time: every key is
+/// compared, each through a SHA-256 digest compared without stopping at the
+/// first difference, so the time taken says nothing about the keys.
+pub fn contains(set: KeySet, candidate: String) -> Bool {
+  any_key(set, fn(key) { secure_equal(key, candidate) })
+}
+
+/// Runs `check` against every key and returns whether any passed, without
+/// stopping at the first match, so the time taken does not reveal which
+/// key matched. Use it to verify a signature with each key:
+///
+/// ```gleam
+/// docuconf.any_key(config.webhook_keys, fn(key) {
+///   docuconf.secure_equal(hmac_sha256(key, body), signature)
+/// })
+/// ```
+pub fn any_key(set: KeySet, check: fn(String) -> Bool) -> Bool {
+  keys(set)
+  |> list.map(check)
+  |> list.fold(False, fn(any, ok) { any || ok })
+}
+
+/// Compares two strings in constant time (through their SHA-256 digests),
+/// for signatures and keys.
+@external(erlang, "docuconf_ffi", "secure_equal")
+@external(javascript, "./docuconf_ffi.mjs", "secure_equal")
+pub fn secure_equal(a: String, b: String) -> Bool
+
+/// A key set in the `csv` encoding with `,` between keys:
+/// `WEBHOOK_KEYS=old,new` during a rotation. See `key_set_with`.
+pub fn key_set(name: String, description: String) -> VarBuilder(KeySet) {
+  key_set_with(name, description, encoding: Csv(","))
+}
+
+/// A key set (`type: keySet`, SPEC §4.3) in the given list encoding. It is
+/// always secret, so it has no default and no examples. It holds 1 to 2
+/// keys unless `min_keys` and `max_keys` say otherwise; fewer is
+/// `too_few_items`, more `too_many_items`. A key outside `key_min_length`
+/// and `key_max_length`, and an empty key whatever the bounds (a stray
+/// separator), is `out_of_range`. Keys are never trimmed.
+///
+/// Finish it with `required` or `optional`:
+///
+/// ```gleam
+/// use webhook_keys <- docuconf.env(
+///   docuconf.key_set("WEBHOOK_KEYS", "Keys that verify webhook signatures")
+///   |> docuconf.key_min_length(32)
+///   |> docuconf.key_max_length(256)
+///   |> docuconf.required,
+/// )
+/// ```
+pub fn key_set_with(
+  name: String,
+  description: String,
+  encoding encoding: ListEncoding,
+) -> VarBuilder(KeySet) {
+  let l =
+    list_builder(
+      name,
+      description,
+      encoding,
+      "string",
+      Ok,
+      fn(dyn) {
+        case decode.run(dyn, decode.string) {
+          Ok(s) -> Ok(s)
+          Error(_) -> Error(#(InvalidType, "is not a string"))
+        }
+      },
+      json.String,
+      json_decode,
+    )
+  let wrap = fn(r: Result(List(String), Problem)) {
+    result.map(r, fn(keys) { KeySet(fn() { keys }) })
+  }
+  VarBuilder(
+    meta: VarMeta(
+      ..l.meta,
+      type_: "keySet",
+      secret: True,
+      fields: list.filter(l.meta.fields, fn(f) { f.0 != "items" }),
+    ),
+    parse: fn(s) {
+      // A key in a json array is a JSON string, like a string list's item.
+      l.parse(s)
+      |> result.map_error(fn(e) {
+        case e {
+          #(code, "item " <> rest) -> #(code, "key " <> rest)
+          _ -> e
+        }
+      })
+      |> wrap
+    },
+    parse_items: option.map(l.parse_items, fn(parse) {
+      fn(items) { wrap(parse(items)) }
+    }),
+    check: fn(_) { Ok(Nil) },
+    encode: fn(set) { json.array(keys(set), json.String) },
+  )
+  |> key_limits(1, 2, None, None)
+}
+
+/// The fewest keys the set may hold (default 1, at least 1), exported as
+/// `minKeys`. Fewer is `too_few_items`.
+pub fn min_keys(b: VarBuilder(KeySet), n: Int) -> VarBuilder(KeySet) {
+  let #(_, hi, kmin, kmax) = limits_of(b)
+  key_limits(b, n, hi, kmin, kmax)
+}
+
+/// The most keys the set may hold (default 2, at least `min_keys`),
+/// exported as `maxKeys`. More is `too_many_items`.
+pub fn max_keys(b: VarBuilder(KeySet), n: Int) -> VarBuilder(KeySet) {
+  let #(lo, _, kmin, kmax) = limits_of(b)
+  key_limits(b, lo, n, kmin, kmax)
+}
+
+/// The shortest each key may be, in characters (Unicode code points),
+/// exported as `keyMinLength`. A shorter key is `out_of_range`; its message
+/// gives the key's position and length, never the key.
+pub fn key_min_length(b: VarBuilder(KeySet), n: Int) -> VarBuilder(KeySet) {
+  let #(lo, hi, _, kmax) = limits_of(b)
+  key_limits(b, lo, hi, Some(n), kmax)
+}
+
+/// The longest each key may be, in characters, exported as `keyMaxLength`.
+pub fn key_max_length(b: VarBuilder(KeySet), n: Int) -> VarBuilder(KeySet) {
+  let #(lo, hi, kmin, _) = limits_of(b)
+  key_limits(b, lo, hi, kmin, Some(n))
+}
+
+fn limits_of(b: VarBuilder(KeySet)) -> #(Int, Int, Option(Int), Option(Int)) {
+  let get = fn(key) {
+    case list.key_find(b.meta.fields, key) {
+      Ok(json.Int(n)) -> Some(n)
+      _ -> None
+    }
+  }
+  #(
+    option.unwrap(get("minKeys"), 1),
+    option.unwrap(get("maxKeys"), 2),
+    get("keyMinLength"),
+    get("keyMaxLength"),
+  )
+}
+
+// Sets every limit at once and rebuilds the check from them, so a later
+// call replaces the default rather than adding to it.
+fn key_limits(
+  b: VarBuilder(KeySet),
+  lo: Int,
+  hi: Int,
+  kmin: Option(Int),
+  kmax: Option(Int),
+) -> VarBuilder(KeySet) {
+  let opt = fn(b, key, v) {
+    case v {
+      Some(n) -> set_field(b, key, json.Int(n))
+      None -> b
+    }
+  }
+  let b =
+    b
+    |> set_field("minKeys", json.Int(lo))
+    |> set_field("maxKeys", json.Int(hi))
+    |> opt("keyMinLength", kmin)
+    |> opt("keyMaxLength", kmax)
+  let problems =
+    list.flatten([
+      when(lo < 1, "min_keys must be at least 1"),
+      when(hi < lo, "max_keys must be at least min_keys"),
+      when(option.unwrap(kmin, 1) < 1, "key_min_length must be at least 1"),
+      when(option.unwrap(kmax, 1) < 1, "key_max_length must be at least 1"),
+      case kmin, kmax {
+        Some(a), Some(z) if a > z -> [
+          "key_min_length "
+          <> int.to_string(a)
+          <> " is greater than key_max_length "
+          <> int.to_string(z),
+        ]
+        _, _ -> []
+      },
+    ])
+  let meta =
+    VarMeta(
+      ..b.meta,
+      problems: list.filter(b.meta.problems, fn(p) {
+          !list.any(
+            ["min_keys", "max_keys", "key_min_length", "key_max_length"],
+            string.starts_with(p, _),
+          )
+        })
+        |> list.append(problems),
+    )
+  VarBuilder(..b, meta:, check: fn(set) {
+    let ks = keys(set)
+    let n = list.length(ks)
+    case n < lo, n > hi {
+      True, _ ->
+        Error(#(
+          TooFewItems,
+          "has "
+            <> int.to_string(n)
+            <> " keys, fewer than minKeys "
+            <> int.to_string(lo),
+        ))
+      _, True ->
+        Error(#(
+          TooManyItems,
+          "has "
+            <> int.to_string(n)
+            <> " keys, more than maxKeys "
+            <> int.to_string(hi),
+        ))
+      _, _ ->
+        ks
+        |> list.index_map(fn(k, i) { #(char_count(k), i + 1) })
+        |> list.try_each(fn(pair) {
+          let #(len, i) = pair
+          let what = "key " <> int.to_string(i) <> " is "
+          case len, kmin, kmax {
+            0, _, _ ->
+              Error(#(OutOfRange, what <> "empty (a stray separator?)"))
+            _, Some(m), _ if len < m ->
+              Error(#(
+                OutOfRange,
+                what
+                  <> int.to_string(len)
+                  <> " characters, shorter than keyMinLength "
+                  <> int.to_string(m),
+              ))
+            _, _, Some(m) if len > m ->
+              Error(#(
+                OutOfRange,
+                what
+                  <> int.to_string(len)
+                  <> " characters, longer than keyMaxLength "
+                  <> int.to_string(m),
+              ))
+            _, _, _ -> Ok(Nil)
+          }
+        })
+    }
+  })
 }
 
 /// The JSON Schema of a `json` variable, exported in the contract.
@@ -1374,9 +1648,20 @@ pub fn config_key(b: VarBuilder(a), key: String) -> VarBuilder(a) {
   VarBuilder(..b, meta: VarMeta(..b.meta, config_key: Some(key)))
 }
 
-/// Marks the variable deprecated; a warning is printed when it is set.
+/// Marks the variable deprecated (SPEC §4.2): the platform should stop
+/// setting it. `message` says what to use instead, or why the variable is
+/// going away; it must not be blank and is at most 500 characters. A
+/// deprecated variable that is set still loads and is still checked, and a
+/// boot warning names it and the message, never the value. A required
+/// variable cannot be deprecated: finish it with `optional` or `default`.
 pub fn deprecated(b: VarBuilder(a), message: String) -> VarBuilder(a) {
   VarBuilder(..b, meta: VarMeta(..b.meta, deprecated: Some(message)))
+}
+
+/// The variable that replaces a deprecated one, exported as
+/// `deprecated.replacedBy`: `deprecated("Use PORT instead") |> replaced_by("PORT")`.
+pub fn replaced_by(b: VarBuilder(a), name: String) -> VarBuilder(a) {
+  VarBuilder(..b, meta: VarMeta(..b.meta, replaced_by: Some(name)))
 }
 
 /// Silences the feature-flag naming warning (SPEC §10) for a deliberate
@@ -1551,10 +1836,9 @@ fn parse_float(s: String) -> Result(Float, Problem) {
     None -> True
     Some("-" <> e) | Some("+" <> e) | Some(e) -> all_digits(e)
   }
-  let digits_ok =
-    { whole == "" || all_digits(whole) }
-    && { frac == "" || all_digits(frac) }
-    && { whole != "" || frac != "" }
+  // SPEC §5: digits on both sides of the point, so `.5` and `5.` fail.
+  let has_point = string.contains(mantissa, ".")
+  let digits_ok = all_digits(whole) && { !has_point || all_digits(frac) }
   case digits_ok && exp_ok {
     False -> bad
     True -> {
@@ -1583,12 +1867,19 @@ fn zero_if_empty(s: String) -> String {
 }
 
 fn parse_float_ffi(s: String) -> Result(Float, Nil) {
-  // float.parse handles "1.0e5"; values too large to represent fail.
+  // float.parse handles "1.0e5". A value too large for a double fails on
+  // Erlang and is infinite on JavaScript: neither is finite.
   case float.parse(s) {
-    Ok(f) -> Ok(f)
+    Ok(f) ->
+      case f <=. max_double && f >=. 0.0 -. max_double {
+        True -> Ok(f)
+        False -> Error(Nil)
+      }
     Error(Nil) -> Error(Nil)
   }
 }
+
+const max_double = 1.7976931348623157e308
 
 fn is_url(s: String) -> Bool {
   case string.split_once(s, "://") {
@@ -1696,7 +1987,10 @@ fn file_builder(
       group: None,
       path:,
       path_env: None,
+      reload: None,
       max_size: None,
+      deprecated: None,
+      replaced_by: None,
       fields: [],
       problems: [],
     ),
@@ -1770,6 +2064,91 @@ pub fn config_file_with(
                 #(
                   SchemaMismatch,
                   path <> " does not decode: " <> decode_errors(errors),
+                ),
+              ])
+          }
+      }
+    })
+  let b = FileBuilder(..b, meta: FileMeta(..b.meta, format: Some(format)))
+  case list.contains(["json", "yaml", "toml"], format) {
+    True -> b
+    False -> file_problem(b, "format must be json, yaml or toml")
+  }
+}
+
+/// Parses YAML for `config_file_with(format: "yaml", parse: docuconf.parse_yaml, ...)`.
+/// It reads the YAML config files hold: block and flow mappings and lists,
+/// plain, quoted and block scalars, and comments, resolving plain scalars
+/// with the YAML 1.2 core schema (`yes` is a string, `0o17` an integer).
+/// Anchors, aliases, tags and several documents in one file are reported
+/// as errors, so the file is `file_malformed` rather than misread.
+pub fn parse_yaml(text: String) -> Result(Dynamic, String) {
+  yaml.parse(text) |> result.map(json_to_dynamic)
+}
+
+/// Parses TOML 1.0 for `config_file_with(format: "toml", parse: docuconf.parse_toml, ...)`.
+/// Dates and times are read as their text.
+pub fn parse_toml(text: String) -> Result(Dynamic, String) {
+  toml.parse(text) |> result.map(json_to_dynamic)
+}
+
+fn json_to_dynamic(j: Json) -> Dynamic {
+  case j {
+    json.Null -> dynamic.nil()
+    json.Bool(b) -> dynamic.bool(b)
+    json.Int(i) -> dynamic.int(i)
+    json.Float(f) -> dynamic.float(f)
+    json.String(s) -> dynamic.string(s)
+    json.Array(items) -> dynamic.list(list.map(items, json_to_dynamic))
+    json.Object(fields) ->
+      dynamic.properties(
+        list.map(fields, fn(f) { #(dynamic.string(f.0), json_to_dynamic(f.1)) }),
+      )
+  }
+}
+
+/// A config file in any format, read as JSON and checked with `check`
+/// (contract-first mode's JSON Schema validation), whose messages are
+/// `schema_mismatch`.
+@internal
+pub fn config_file_json(
+  name: String,
+  description: String,
+  path path: String,
+  format format: String,
+  check check: fn(Json) -> List(String),
+) -> FileBuilder(Json) {
+  let parse = case format {
+    "yaml" -> yaml.parse
+    "toml" -> toml.parse
+    _ -> json.parse
+  }
+  let b =
+    file_builder(name, "config", description, path, fn(path, _opts, _ctx) {
+      use text <- read_text(path)
+      case parse(strip_bom(text)) {
+        Error(why) ->
+          Failed([
+            #(
+              FileMalformed,
+              path
+                <> " is not valid "
+                <> string.uppercase(format)
+                <> " ("
+                <> why
+                <> ")",
+            ),
+          ])
+        Ok(value) ->
+          case check(value) {
+            [] -> Loaded(value)
+            problems ->
+              Failed([
+                #(
+                  SchemaMismatch,
+                  path
+                    <> " does not match its schema: "
+                    <> string.join(problems, "; "),
                 ),
               ])
           }
@@ -2063,6 +2442,18 @@ pub fn file_details(b: FileBuilder(a), text: String) -> FileBuilder(a) {
   FileBuilder(..b, meta: FileMeta(..b.meta, details: Some(text)))
 }
 
+/// Marks the file input deprecated, as `deprecated` does a variable; a boot
+/// warning names it when the file is present. A required file input cannot
+/// be deprecated.
+pub fn file_deprecated(b: FileBuilder(a), message: String) -> FileBuilder(a) {
+  FileBuilder(..b, meta: FileMeta(..b.meta, deprecated: Some(message)))
+}
+
+/// The file input that replaces a deprecated one.
+pub fn file_replaced_by(b: FileBuilder(a), name: String) -> FileBuilder(a) {
+  FileBuilder(..b, meta: FileMeta(..b.meta, replaced_by: Some(name)))
+}
+
 /// A group name for docs: related inputs are listed together.
 pub fn file_group(b: FileBuilder(a), group: String) -> FileBuilder(a) {
   FileBuilder(..b, meta: FileMeta(..b.meta, group: Some(group)))
@@ -2117,6 +2508,163 @@ fn file_only(
       )
   }
 }
+
+/// Transforms a declared file input's value, as `map` does a variable's.
+pub fn map_file(input: File(a), with f: fn(a) -> b) -> File(b) {
+  File(meta: input.meta, load: fn(path, ctx) {
+    result.map(input.load(path, ctx), f)
+  })
+}
+
+// ---- reload: watch ----------------------------------------------------------------
+
+/// The value of a file input declared with `reload_watch`. Read the file's
+/// current content with `current`.
+pub opaque type Watched(a) {
+  Watched(cell: Cell(WatchState(a)))
+}
+
+type WatchState(a) {
+  WatchState(
+    value: a,
+    paths: List(String),
+    stamps: List(String),
+    next_check: Int,
+    reload: fn() -> Result(#(a, List(String)), List(Problem)),
+    name: String,
+  )
+}
+
+/// How often, at most, `current` looks at the files of a watched input.
+const watch_interval_ms = 1000
+
+/// The app rereads the file when it changes, exported as `reload: watch`
+/// (SPEC §4.6.2): a renewed certificate or an edited ConfigMap reaches the
+/// app without a rollout. The value becomes a `Watched(a)`; `current`
+/// returns the content as of now:
+///
+/// ```gleam
+/// use routes <- docuconf.file(
+///   docuconf.config_file("routes", "Routing table", path: "/etc/gw/routes/routes.json", decoder: routes_decoder())
+///   |> docuconf.reload_watch
+///   |> docuconf.file_required,
+/// )
+/// // later, per request:
+/// let table = docuconf.current(config.routes)
+/// ```
+///
+/// `current` checks the file's size, modification time and inode (for a
+/// `tls` input, those of `tls.crt`, `tls.key` and `ca.crt`) at most once a
+/// second, following symlinks, so the symlink swap Kubernetes uses to update
+/// a mounted volume counts as a change. A changed file is checked exactly as
+/// at boot; when it fails (or is gone), the previous content stays current
+/// and a warning naming the input and the problem is printed to stderr.
+///
+/// Call it before `secret_file`, `file_required` or `file_optional`.
+pub fn reload_watch(b: FileBuilder(a)) -> FileBuilder(Watched(a)) {
+  FileBuilder(
+    meta: FileMeta(..b.meta, reload: Some("watch")),
+    opts: b.opts,
+    load: fn(path, opts, ctx) {
+      let paths = watch_paths(b.meta.type_, path)
+      let stamps = fn() { list.map(paths, stamp) }
+      let before = stamps()
+      case b.load(path, opts, ctx) {
+        Missing -> Missing
+        Failed(ps) -> Failed(ps)
+        Loaded(v) -> {
+          let reload = fn() {
+            let now = stamps()
+            case check_file(b, path, ctx) {
+              Loaded(v) -> Ok(#(v, now))
+              Failed(ps) -> Error(ps)
+              Missing -> Error([#(FileMissing, path <> " not found")])
+            }
+          }
+          Loaded(
+            Watched(
+              cell_new(WatchState(
+                value: v,
+                paths:,
+                stamps: before,
+                next_check: monotonic_ms() + watch_interval_ms,
+                reload:,
+                name: b.meta.name,
+              )),
+            ),
+          )
+        }
+      }
+    },
+  )
+}
+
+/// The current content of a watched file input: rereads the file when it
+/// changed since the last look (at most once a second). See `reload_watch`.
+pub fn current(watched: Watched(a)) -> a {
+  cell_update(watched.cell, refresh).value
+}
+
+fn refresh(state: WatchState(a)) -> WatchState(a) {
+  let now = monotonic_ms()
+  case now < state.next_check {
+    True -> state
+    False -> {
+      let state = WatchState(..state, next_check: now + watch_interval_ms)
+      let stamps = list.map(state.paths, stamp)
+      case stamps == state.stamps {
+        True -> state
+        False ->
+          case state.reload() {
+            Ok(#(value, stamps)) -> WatchState(..state, value:, stamps:)
+            Error(problems) -> {
+              list.each(problems, fn(p) {
+                print_error(
+                  "docuconf: warning: changed file input "
+                  <> state.name
+                  <> " rejected, keeping the previous content: ["
+                  <> code_to_string(p.0)
+                  <> "] "
+                  <> p.1,
+                )
+              })
+              // Not tried again until the files change again.
+              WatchState(..state, stamps:)
+            }
+          }
+      }
+    }
+  }
+}
+
+fn watch_paths(type_: String, path: String) -> List(String) {
+  case type_ {
+    "tls" -> [path <> "/tls.crt", path <> "/tls.key", path <> "/ca.crt"]
+    _ -> [path]
+  }
+}
+
+type Cell(a)
+
+@external(erlang, "docuconf_ffi", "cell_new")
+@external(javascript, "./docuconf_ffi.mjs", "cell_new")
+fn cell_new(value: a) -> Cell(a)
+
+// Replaces the cell's value with f(value) and returns it; on Erlang the
+// cell is a process, so concurrent callers update it one at a time.
+@external(erlang, "docuconf_ffi", "cell_update")
+@external(javascript, "./docuconf_ffi.mjs", "cell_update")
+fn cell_update(cell: Cell(a), f: fn(a) -> a) -> a
+
+@external(erlang, "docuconf_ffi", "monotonic_ms")
+@external(javascript, "./docuconf_ffi.mjs", "monotonic_ms")
+fn monotonic_ms() -> Int
+
+// Size, modification time and inode, following symlinks; "absent" when the
+// file cannot be read.
+@external(erlang, "docuconf_ffi", "file_stamp")
+@external(javascript, "./docuconf_ffi.mjs", "file_stamp")
+fn stamp(path: String) -> String
 
 /// The file must be present.
 pub fn file_required(b: FileBuilder(a)) -> File(a) {
@@ -2265,6 +2813,7 @@ type Context {
     now: Int,
     /// Every declared variable name and path_env, for typo hints.
     declared: List(String),
+    layers: Dict(String, Layer),
   )
 }
 
@@ -2388,7 +2937,7 @@ fn handle(key: String) -> fn(Values) -> a {
 
 fn read_env(var: Var(a), ctx: Context) -> Result(a, List(Violation)) {
   let m = var.meta
-  let raw = case list.key_find(m.fields, "encoding") {
+  let from_env = case list.key_find(m.fields, "encoding") {
     Ok(json.String("indexed")) ->
       case indexed_items(ctx.env, m.name) {
         Ok([]) -> Ok(None)
@@ -2412,6 +2961,14 @@ fn read_env(var: Var(a), ctx: Context) -> Result(a, List(Violation)) {
         Ok(s) -> Ok(Some(Text(s)))
         Error(Nil) -> Ok(None)
       }
+  }
+  // The environment wins; a layer only fills in a variable it leaves unset.
+  let raw = case from_env, dict.get(ctx.layers, m.name) {
+    Ok(None), Ok(LayerText("")) if m.type_ != "string" -> Ok(None)
+    Ok(None), Ok(LayerText(s)) -> Ok(Some(Text(s)))
+    Ok(None), Ok(LayerItems(items)) -> Ok(Some(Items(items)))
+    _, Ok(LayerInvalid(msg)) -> Error(#(InvalidType, msg))
+    _, _ -> from_env
   }
   case raw {
     Error(#(code, msg)) -> Error([Violation(m.name, VarKind, code, msg)])
@@ -2556,13 +3113,57 @@ pub opaque type Options {
     termination_log: Option(String),
     write_termination_log: Bool,
     on_warning: Option(fn(String) -> Nil),
+    layers: Dict(String, Layer),
+    violations: List(Violation),
   )
+}
+
+/// A variable's value from a layer below the environment (a config-file
+/// overlay, SPEC §4.7), as contract-first mode reads it: the wire string,
+/// the items of a list, or why the overlay's value cannot be one.
+@internal
+pub type Layer {
+  LayerText(String)
+  LayerItems(List(String))
+  LayerInvalid(String)
+}
+
+/// Values a variable takes when the environment does not set it, checked
+/// like environment values, and violations found while reading them.
+@internal
+pub fn with_layers(
+  o: Options,
+  layers: Dict(String, Layer),
+  violations: List(Violation),
+) -> Options {
+  Options(..o, layers:, violations:)
+}
+
+/// The environment `load_with` reads with these options.
+@internal
+pub fn environment(o: Options) -> Dict(String, String) {
+  option.lazy_unwrap(o.env, envoy.all)
+}
+
+/// The file root `load_with` uses with these options and environment.
+@internal
+pub fn file_root(o: Options, env: Dict(String, String)) -> Option(String) {
+  case o.file_root {
+    Some(r) -> Some(r)
+    None -> option.from_result(dict.get(env, "DOCUCONF_FILE_ROOT"))
+  }
+}
+
+/// Reads a file's bytes; the error is the system's reason, such as `enoent`.
+@internal
+pub fn read_bytes(path: String) -> Result(BitArray, String) {
+  read_file(path)
 }
 
 /// The default options: read the process environment, write the
 /// termination log, print warnings to stderr.
 pub fn options() -> Options {
-  Options(None, None, None, None, True, None)
+  Options(None, None, None, None, True, None, dict.new(), [])
 }
 
 /// Reads this map instead of the process environment, for tests. The
@@ -2650,26 +3251,28 @@ pub fn load_with(spec: Spec(a), options: Options) -> Result(a, Error) {
       let ctx =
         Context(
           env:,
-          file_root: case options.file_root {
-            Some(r) -> Some(r)
-            None -> option.from_result(dict.get(env, "DOCUCONF_FILE_ROOT"))
-          },
+          file_root: file_root(options, env),
           now: option.lazy_unwrap(options.now, now_unix),
           declared:,
+          layers: options.layers,
         )
       let warn = case options.on_warning, isolated {
         Some(handler), _ -> handler
         None, False -> fn(w) { print_error("docuconf: warning: " <> w) }
         None, True -> fn(_) { Nil }
       }
-      list.each(boot_warnings(metas, env, declared), warn)
+      list.each(boot_warnings(metas, env, declared, ctx.file_root), warn)
       let #(values, violations) =
-        list.fold(spec.inputs, #(dict.new(), []), fn(acc, input) {
-          case input.read(ctx) {
-            Ok(v) -> #(dict.insert(acc.0, input.key, v), acc.1)
-            Error(vs) -> #(acc.0, list.append(acc.1, vs))
-          }
-        })
+        list.fold(
+          spec.inputs,
+          #(dict.new(), options.violations),
+          fn(acc, input) {
+            case input.read(ctx) {
+              Ok(v) -> #(dict.insert(acc.0, input.key, v), acc.1)
+              Error(vs) -> #(acc.0, list.append(acc.1, vs))
+            }
+          },
+        )
       case violations {
         [] -> Ok(spec.build(Values(values)))
         _ -> {
@@ -2706,21 +3309,24 @@ fn sort_violations(vs: List(Violation)) -> List(Violation) {
 pub fn warnings(spec: Spec(a), options: Options) -> List(String) {
   let metas = metas(spec)
   let env = option.lazy_unwrap(options.env, envoy.all)
-  boot_warnings(metas, env, declared_names(metas))
+  boot_warnings(metas, env, declared_names(metas), file_root(options, env))
 }
 
 fn boot_warnings(
   metas: List(Meta),
   env: Dict(String, String),
   declared: List(String),
+  root: Option(String),
 ) -> List(String) {
   let per_var =
     list.flat_map(metas, fn(m) {
       case m {
         VarInput(v) ->
           list.flatten([
-            case v.deprecated, dict.get(env, v.name) {
-              Some(msg), Ok(_) -> [v.name <> " is deprecated: " <> msg]
+            case v.deprecated, is_set(v, env) {
+              Some(msg), True -> [
+                deprecation_warning(v.name, msg, v.replaced_by),
+              ]
               _, _ -> []
             },
             case v.secret, dict.get(env, v.name) {
@@ -2736,7 +3342,17 @@ fn boot_warnings(
             },
             spaced_items(v, env),
           ])
-        FileInput(_) -> []
+        FileInput(f) ->
+          case f.deprecated {
+            Some(msg) -> {
+              let ctx = Context(env, root, 0, [], dict.new())
+              case file_info(resolve_path(f, ctx)) {
+                Ok(_) -> [deprecation_warning(f.name, msg, f.replaced_by)]
+                Error(_) -> []
+              }
+            }
+            None -> []
+          }
       }
     })
   let typos =
@@ -2759,6 +3375,33 @@ fn boot_warnings(
       }
     })
   list.append(per_var, typos)
+}
+
+// SPEC §4.2: names the input and the message, never the value.
+fn deprecation_warning(
+  name: String,
+  message: String,
+  replaced_by: Option(String),
+) -> String {
+  name
+  <> " is deprecated: "
+  <> message
+  <> case replaced_by {
+    Some(r) -> " (replaced by " <> r <> ")"
+    None -> ""
+  }
+}
+
+// Whether the environment sets a variable: a non-empty value (an empty one
+// is unset, SPEC §5, except for a string), or any item of an indexed list.
+fn is_set(v: VarMeta, env: Dict(String, String)) -> Bool {
+  case list.key_find(v.fields, "encoding"), dict.get(env, v.name) {
+    Ok(json.String("indexed")), _ ->
+      dict.get(env, v.name <> "__0") |> result.is_ok
+    _, Ok("") -> v.type_ == "string"
+    _, Ok(_) -> True
+    _, Error(Nil) -> False
+  }
 }
 
 // A csv list whose items have spaces around them: `a, b` yields " b",
@@ -2955,6 +3598,48 @@ fn details_problems(details: Option(String)) -> List(String) {
   }
 }
 
+/// The most characters (Unicode code points) a deprecation message may
+/// have (SPEC §4.2).
+const max_deprecation = 500
+
+fn deprecation_problems(
+  message: Option(String),
+  replaced_by: Option(String),
+  required: Bool,
+) -> List(String) {
+  case message {
+    None ->
+      when(
+        option.is_some(replaced_by),
+        "replaced_by needs deprecated: say why the input is going away",
+      )
+    Some(m) ->
+      list.flatten([
+        when(
+          string.trim(m) == "",
+          "the deprecated message must say what to use instead, or why the input is going away",
+        ),
+        when(
+          char_count(m) > max_deprecation,
+          "the deprecated message is "
+            <> int.to_string(char_count(m))
+            <> " characters; at most "
+            <> int.to_string(max_deprecation)
+            <> " are allowed",
+        ),
+        when(
+          required,
+          "a required input cannot be deprecated: deprecating it asks the platform to stop setting it",
+        ),
+        case replaced_by {
+          Some(r) ->
+            when(string.trim(r) == "", "replaced_by must name an input")
+          None -> []
+        },
+      ])
+  }
+}
+
 fn declaration_problems(metas: List(Meta)) -> List(String) {
   let vars =
     list.filter_map(metas, fn(m) {
@@ -2981,6 +3666,7 @@ fn declaration_problems(metas: List(Meta)) -> List(String) {
         ),
         details_problems(v.details),
         when(v.secret && v.examples != [], "a secret must not have examples"),
+        deprecation_problems(v.deprecated, v.replaced_by, v.required),
         v.problems,
       ])
       |> list.map(fn(p) { "variable " <> v.name <> ": " <> p })
@@ -2997,6 +3683,7 @@ fn declaration_problems(metas: List(Meta)) -> List(String) {
           "description is required and must be at least 5 characters",
         ),
         details_problems(f.details),
+        deprecation_problems(f.deprecated, f.replaced_by, f.required),
         when(!abs_path(f.path), "path must be absolute and normalised"),
         case f.path_env {
           Some(e) ->

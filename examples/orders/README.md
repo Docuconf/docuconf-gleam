@@ -21,7 +21,7 @@ builders. That one declaration:
 | `ALLOWED_ORIGINS` | list of strings (comma-separated) | at least 1 item; default `http://localhost:3000` |
 | `REQUEST_TIMEOUT` | duration (`30s`, `1m30s`) | 1s–5m, default `30s` |
 | `WORKER_COUNT` | int | 1–64, default `4` |
-| `WEBHOOK_KEYS` | list of strings (comma-separated) | secret, optional; 1–2 keys of 32–256 characters each |
+| `WEBHOOK_KEYS` | key set (comma-separated) | always secret, optional; 1–2 keys of 32–256 characters each |
 
 ## Run it
 
@@ -63,9 +63,11 @@ each key of the key set below.
 
 ## Rotate a key
 
-`WEBHOOK_KEYS` is a key set: `POST /webhooks/payments` accepts a body whose
-`X-Signature` header is the hex HMAC-SHA256 of the body under any key in the
-list ([`src/orders/webhook.gleam`](src/orders/webhook.gleam)). A variable is
+`WEBHOOK_KEYS` is a `keySet` (`docuconf.key_set`): `POST /webhooks/payments`
+accepts a body whose `X-Signature` header is the hex HMAC-SHA256 of the body
+under any key in the set. [`src/orders/webhook.gleam`](src/orders/webhook.gleam)
+checks it with `docuconf.any_key`, which tries every key without stopping at
+the first match, so the time taken does not say which key matched. A variable is
 read once, at start, so a new key reaches the service only when the pods
 restart; with two keys valid at once, no webhook is turned away while that
 happens:
@@ -84,7 +86,16 @@ WEBHOOK_KEYS:
 
 The contract allows 1 or 2 keys of 32 to 256 characters each, so a trailing
 comma or a truncated key stops the service at boot instead of locking out
-the sender, and the problem never prints a key.
+the sender, and the problem never prints a key:
+
+```
+$ DATABASE_URL=postgres://orders:secret@localhost:5432/orders WEBHOOK_KEYS=old-webhook-key-0123456789abcdef0123, gleam run
+docuconf: 1 configuration problem:
+  - WEBHOOK_KEYS [out_of_range]: key 2 is empty (a stray separator?)
+```
+
+The generated docs print these steps for every key set, so the declaration's
+`details` do not repeat them.
 [`test/webhook_test.gleam`](test/webhook_test.gleam) walks through a
 rotation.
 [docuconf-go's SPEC section 6.1](https://github.com/docuconf/docuconf-go/blob/main/spec/SPEC.md#61-rotation)

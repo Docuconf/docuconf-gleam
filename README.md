@@ -52,7 +52,7 @@ One module holds the declaration. Each `use` line declares one variable,
 and `build` makes your config from the values:
 
 ```gleam
-import docuconf.{type Secret}
+import docuconf.{type KeySet, type Secret}
 import docuconf/duration.{type Duration}
 import gleam/json.{type Json}
 import gleam/option.{type Option}
@@ -67,7 +67,7 @@ pub type Config {
     allowed_origins: List(String),
     request_timeout: Duration,
     worker_count: Int,
-    webhook_keys: Option(Secret(List(String))),
+    webhook_keys: Option(KeySet),
   )
 }
 
@@ -127,28 +127,19 @@ load balancer's idle timeout, or the client sees a reset rather than a
     |> docuconf.max_int(64)
     |> docuconf.default(4),
   )
-  // A key set (SPEC §6.1): a secret list of one or two keys, so a key can be
-  // rotated with an overlap in which both are valid.
+  // A key set (SPEC §4.3, §6.1): one or two secret keys, all valid at once,
+  // so a key can be rotated with an overlap in which both are valid. It is
+  // always secret; the generated docs print the rotation steps.
   use webhook_keys <- docuconf.env(
-    docuconf.string_list(
+    docuconf.key_set(
       "WEBHOOK_KEYS",
       "Keys that verify the signature on incoming payment webhooks",
-      separator: ",",
     )
     |> docuconf.details(
-      "A webhook is accepted when it is signed with any key in the list, so the key can be rotated without turning webhooks away. To rotate:
-
- 1. add the new key as the second item, and roll out;
- 2. switch the sender to the new key;
- 3. remove the old key, and roll out.
-
-Each key is 32 to 256 characters, so an empty or truncated key fails at boot. Without this variable, the service rejects every webhook.",
+      "A webhook is accepted when it is signed with any key in the set. Without this variable, the service rejects every webhook.",
     )
-    |> docuconf.min_items(1)
-    |> docuconf.max_items(2)
-    |> docuconf.item_min_length(32)
-    |> docuconf.item_max_length(256)
-    |> docuconf.secret
+    |> docuconf.key_min_length(32)
+    |> docuconf.key_max_length(256)
     |> docuconf.optional,
   )
   // Each `use` above bound a handle; `build` reads the values once they
@@ -211,12 +202,9 @@ What to know:
   details are blank or too long. `docuconf docs` in the
   [docuconf CLI](https://github.com/docuconf/docuconf-go) generates
   `CONFIG.md` and `CONFIG.agents.md` from the exported contract.
-- **A key set** is a secret list: `string_list` with `min_items`,
-  `max_items`, `item_min_length` and `item_max_length`, then `secret`.
-  `WEBHOOK_KEYS` above holds one or two keys, so a key can be rotated with
-  an overlap in which both are valid
-  ([SPEC section 6.1](https://github.com/docuconf/docuconf-go/blob/main/spec/SPEC.md#61-rotation));
-  a trailing comma or a truncated key fails the boot with `out_of_range`.
+- **A key set** (`key_set`, `type: keySet`, SPEC §4.3) holds the keys a
+  verifier accepts, so a key can be rotated with an overlap in which both
+  are valid. `WEBHOOK_KEYS` above is one; see [Key sets](#key-sets).
 - **To decide on a value, declare first, then decide in `build`.** A
   variable used only when a flag is on is declared `optional` (the
   contract lists it), and `build` reads it when the flag is set. A wrong
@@ -391,7 +379,7 @@ this; CI builds it, runs its tests and smoke-tests the running service.
 |---|---|---|---|
 | `string` | `string` | `String` | `min_length`, `max_length`, `pattern` |
 | `int` | `int` | `Int` (64-bit range checked; ±(2^53 − 1) on JavaScript) | `min_int`, `max_int` |
-| `float` | `float` | `Float` (NaN/Inf rejected) | `min_float`, `max_float` |
+| `float` | `float` | `Float` (finite decimals only) | `min_float`, `max_float` |
 | `bool` | `bool` | `Bool` (`true`/`false`, any case) | |
 | `duration` | `duration` (`go` encoding) | `docuconf/duration.Duration` | `min_duration`, `max_duration` |
 | `duration_with(name, desc, encoding: Iso8601)` | `duration` (`go`, `iso8601`, `seconds`, `timespan`) | `docuconf/duration.Duration` | `min_duration`, `max_duration` |
@@ -401,11 +389,13 @@ this; CI builds it, runs its tests and smoke-tests the running service.
 | `int_list(name, desc, separator: ",")` | `list` (`csv`) | `List(Int)` | `min_items`, `max_items`, `item_min`, `item_max` |
 | `string_list_with(name, desc, encoding: Indexed)` | `list` (`csv`, `json`, `indexed`) | `List(String)` | `min_items`, `max_items`, `item_min_length`, `item_max_length` |
 | `int_list_with(name, desc, encoding: JsonArray)` | `list` (`csv`, `json`, `indexed`) | `List(Int)` | `min_items`, `max_items`, `item_min`, `item_max` |
+| `key_set(name, desc)` | `keySet` (`csv`, `,`) | `KeySet` (always secret) | `min_keys`, `max_keys`, `key_min_length`, `key_max_length` |
+| `key_set_with(name, desc, encoding: JsonArray)` | `keySet` (`csv`, `json`, `indexed`) | `KeySet` (always secret) | `min_keys`, `max_keys`, `key_min_length`, `key_max_length` |
 | `json(name, desc, decoder:, encode:)` | `json` | your own type | `schema`, `max_length` |
 
 Every builder also takes `secret` (the value becomes a `Secret(a)`),
-`details`, `group`, `examples`, `config_key`, `deprecated` and
-`deploy_time_switch`.
+`details`, `group`, `examples`, `config_key`, `deprecated`, `replaced_by`
+and `deploy_time_switch`.
 Finish each one with `required`, `optional` (a `None` when unset) or
 `default(value)`.
 
@@ -480,8 +470,29 @@ Finish each one with `required`, `optional` (a `None` when unset) or
   `itemMaxLength`, and an `item_min_length` above `item_max_length` is a
   declaration error. A value out of bounds is `out_of_range`, and a secret
   is reported by its length, never its value.
+- **Parsing is strict** (SPEC §5), whatever Gleam's own parsers accept, and
+  the same on both targets. Values are never trimmed: `" true"`, `"8080\n"`
+  and `"5s "` are `invalid_type`, and so are `csv` items with spaces around
+  them where the item type does not take them (`1, 2` for an int list). A
+  `bool` is `true` or `false` in any case (`TRUE`, `False`) and nothing
+  else (`1`, `yes`, `on` fail). An `int` is `^[+-]?[0-9]+$`, base 10, so
+  `007` is 7 and `0x10`, `1_000` and `1e3` fail; beyond 64 bits it is
+  `out_of_range`. A `float` is `^[+-]?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$`:
+  `.5`, `5.`, `inf`, `NaN`, hex floats and `1e400` fail. Durations follow
+  their encoding's exact grammar (`5`, `5S` and `1d` are not Go durations;
+  ISO 8601 is upper case and unsigned). Digits are ASCII only.
 - **Empty strings** are present values for `string` and unset for every
-  other type. Values are never trimmed.
+  other type.
+- **Deprecated variables**: `deprecated(message)` marks a variable the
+  platform should stop setting, and `replaced_by(name)` names its
+  successor; both are exported as `deprecated: {message, replacedBy}`
+  (SPEC §4.2). The message must not be blank and is at most 500
+  characters, and a `required` variable cannot be deprecated: each is a
+  declaration error. A deprecated variable that is set still loads and is
+  still checked; a boot warning names it and the message, never the value:
+  `OLD_PORT is deprecated: Use PORT instead (replaced by PORT)`.
+  `file_deprecated` and `file_replaced_by` do the same for a file input,
+  warning when the file is present.
 - **`json` and config files** decode into your own type with a
   `gleam/dynamic/decode` decoder. Gleam cannot derive a JSON Schema from a
   type, so you attach one with `schema` / `file_schema` (built with
@@ -509,6 +520,49 @@ or file: names, description length, defaults against their own constraints
 examples, non-RE2 patterns, constraints on the wrong type and the file
 mount rules. `flag_warnings(spec)` lists names that look like feature flags
 (SPEC §10); call it from a test or lint.
+
+## Key sets
+
+A key set (SPEC §4.3, §6.1) is the set of secret keys a verifier accepts:
+webhook signatures, inbound API keys, JWT HMAC verification. During a
+rotation two keys are valid at once (`old,new`), so no request is turned
+away while the pods restart.
+
+```gleam
+pub fn api_keys() -> docuconf.Spec(KeySet) {
+  use keys <- docuconf.env(
+    docuconf.key_set("API_KEYS", "Keys that callers present")
+    |> docuconf.key_min_length(32)
+    |> docuconf.key_max_length(256)
+    |> docuconf.required,
+  )
+  docuconf.build(keys)
+}
+
+pub fn authorized(keys: KeySet, presented: String) -> Bool {
+  docuconf.contains(keys, presented)
+}
+```
+
+- It travels in a list's encodings: `key_set` is `csv` with `,`;
+  `key_set_with(name, desc, encoding: JsonArray)` or `Indexed` take the
+  others. Keys are never trimmed.
+- It holds `min_keys` to `max_keys` keys (default 1 to 2); fewer is
+  `too_few_items`, more `too_many_items`. A key outside `key_min_length`
+  and `key_max_length`, and an empty key whatever the bounds (a trailing
+  comma), is `out_of_range`. The message gives the key's position and
+  length, never the key.
+- It is always secret: it has no default and no examples, a `KeySet`
+  prints as `KeySet(//fn() { ... })`, and no error or warning holds a key.
+- `keys(set)` gives the keys in order. `contains(set, candidate)` compares
+  in constant time, and `any_key(set, check)` runs your check (an HMAC
+  comparison) against every key without stopping at the first match, as
+  [`examples/orders`](examples/orders/src/orders/webhook.gleam) does to
+  verify a webhook signature. `secure_equal(a, b)` is the constant-time
+  comparison `contains` uses.
+
+`docuconf docs` prints the three rotation steps for every key set, so
+`details` need not repeat them.
 
 ## Why `use` binds handles
 
@@ -543,16 +597,17 @@ returns `WriteFailed` when it cannot write.
 | Builder | Contract type | Gleam value | Options |
 |---|---|---|---|
 | `config_file(name, desc, path:, decoder:)` | `config` (JSON) | your type | `file_schema` |
-| `config_file_with(name, desc, path:, format:, parse:, decoder:)` | `config` (YAML, TOML) | your type | `file_schema` |
+| `config_file_with(name, desc, path:, format:, parse:, decoder:)` | `config` (YAML with `parse: docuconf.parse_yaml`, TOML with `parse: docuconf.parse_toml`, or your own parser) | your type | `file_schema` |
 | `tls(name, desc, path:)` | `tls` | `Tls(dir, cert_file, key_file, ca_file)` | `dns_names`, `key_algorithms`, `min_remaining`, `require_ca` |
 | `ca_bundle(name, desc, path:)` | `caBundle` | `CaBundle(path, certificates)` | `min_certificates` |
 | `keystore(name, desc, path:, format:, password_var:)` | `keystore` | path | |
 | `text(name, desc, path:)` | `text` | the content | `text_pattern`, `text_min_length`, `text_max_length` |
 | `binary(name, desc, path:)` | `binary` | path | |
 
-All take `path_env`, `max_size`, `file_details`, `file_group` and `secret_file` (the value
-becomes a `Secret(a)`), and are finished with `file_required` or
-`file_optional`:
+All take `path_env`, `max_size`, `file_details`, `file_group`,
+`file_deprecated`, `file_replaced_by`, `reload_watch` (the value becomes a
+`Watched(a)`) and `secret_file` (the value becomes a `Secret(a)`), and are
+finished with `file_required` or `file_optional`:
 
 ```gleam
 pub fn files() -> docuconf.Spec(Files) {
@@ -591,7 +646,29 @@ pub fn files() -> docuconf.Spec(Files) {
 
 `DOCUCONF_FILE_ROOT` (or `with_file_root`) is prefixed to every absolute
 path, including paths read from a `path_env` variable. TLS checks use
-`:public_key` on Erlang and `node:crypto` on JavaScript.
+`:public_key` on Erlang and `node:crypto` on JavaScript. A `tls.crt` or
+`tls.key` that holds no PEM block at all is `file_malformed`; one that does
+not parse, an expired or not-yet-valid certificate, a disallowed key
+algorithm and a broken chain are `certificate_invalid`.
+
+**YAML and TOML.** `parse_yaml` reads the YAML config files hold: block and
+flow mappings and lists, plain, quoted and block (`|`, `>`) scalars and
+comments, with the YAML 1.2 core schema (`yes` is a string, `0o17` an
+integer). Anchors, aliases, tags and several documents in one file are
+reported as `file_malformed` rather than misread. `parse_toml` reads TOML
+1.0; dates and times become their text. Neither target has a YAML or TOML
+parser of its own, so both are docuconf's, in Gleam.
+
+**`reload: watch`.** `reload_watch` exports `reload: "watch"` (SPEC §4.6.2):
+the app rereads the file when the platform changes it, with no rollout.
+`current(watched)` returns the content as of now. It looks at the file's
+size, modification time and inode (for a `tls` input, at `tls.crt`,
+`tls.key` and `ca.crt`) at most once a second, following symlinks, so the
+symlink swap Kubernetes uses to update a mounted volume is seen. A changed
+file is checked as at boot; if it fails, the previous content stays and a
+warning naming the input and the problem goes to stderr. On Erlang the
+current content lives in a small process, so every process of the app sees
+the same one.
 
 **Keystores** are opened with the password from `password_var` (an empty
 password when it is `None` or unset). Neither OTP nor Node.js reads PKCS#12
@@ -647,11 +724,34 @@ let assert Ok(values) = contract_first.load(contract_json, docuconf.options())
 let assert Ok(contract_first.IntValue(port)) = dict.get(values, "PORT")
 ```
 
-`load` returns a `Dict(String, Value)`, with `Absent` for an unset optional
-variable and `SecretValue` for a secret, or the same `InvalidConfig` error
-as `load_with`. `contract_first.spec(json)` returns the declaration
-instead, for `load_with` or `contract`. File inputs are not supported (a
-contract with `files` is rejected).
+`load` (or `load_json`, for a contract already parsed) returns a
+`Dict(String, Value)`, with `Absent` for an unset optional input and
+`SecretValue` for a secret, or the same `InvalidConfig` error as
+`load_with`. The whole contract is covered:
+
+- `vars` of every type: a `keySet` is a `KeySetValue`, and a deprecated
+  variable that is set gets the boot warning.
+- `files`, read under `DOCUCONF_FILE_ROOT` like a declaration's: a `config`
+  file in JSON, YAML or TOML is a `JsonValue` of its data, checked against
+  its `schema`; a `text` file is a `StringValue`; `tls`, `caBundle`,
+  `keystore` (PKCS#12 and JKS) and `binary` inputs are `TlsValue`,
+  `CaBundleValue`, `KeystoreValue` and `BinaryValue`. `reload: watch` is a
+  declaration error here: contract-first mode reads each file once.
+- `profiles` (SPEC §4.4): the selector's value, or `profiles.default` when
+  it is unset, picks the profile, whose values stand in for the variables'
+  defaults; a profile value satisfies a required variable.
+- `overlays` (SPEC §4.7): each overlay file (JSON, YAML or TOML) is read
+  when present. The value at each variable's `configKey`, split on
+  `keySeparator`, is converted to the wire string it stands for and checked
+  exactly like an environment value. The order is the variable's default,
+  then the profile, then the overlay, then the environment. An overlay that
+  does not parse or is not an object is `file_malformed` for the overlay; a
+  value of the wrong shape is `invalid_type` for the variable, and a secret
+  is never taken from an overlay.
+
+Layering needs the environment, so `contract_first.spec(json)`, which
+returns the declaration for `load_with` or `contract`, leaves profiles and
+overlays out (it still checks them).
 
 An `int` holds the full 64-bit range on both targets, as a variable or a
 list item. On Erlang it is always an `IntValue`. On JavaScript, where an
@@ -679,24 +779,29 @@ a declaration error, not silently ignored. A `default` must match the
 schema too. In a declaration, `json` values are still checked by your
 decoder, not by the schema.
 
-## Config-file overlays
+## Config-file overlays and profiles
 
-There is no overlay API (SPEC §4.7). envoy reads the environment and
-nothing layers config files in a Gleam app, so there is no file stack for a
-platform-mounted overlay to sit in between the app's files and the
-environment. A declaration cannot carry `overlays`, and the exported
-contract never has any. Use a `config_file` input if the platform needs to
-supply structured configuration.
+A declaration has no overlay or profile API (SPEC §4.4, §4.7). envoy reads
+the environment and nothing layers config files in a Gleam app, so there is
+no file stack for a profile file or a platform-mounted overlay to sit in. A
+declaration cannot carry `profiles` or `overlays`, and the exported contract
+never has any. Use a `config_file` input if the platform needs to supply
+structured configuration. Contract-first mode does load both, for contracts
+written for other hosts (see [Contract-first mode](#contract-first-mode)).
 
 ## Not covered yet
 
 Compared with the specification and the Elixir SDK:
 
-- `reload: watch` is not offered; every file input is `restart`.
+- Contract-first mode rejects `reload: watch`; a declaration offers it
+  through `reload_watch`.
 - JSON Schemas are not generated from types (Gleam has no reflection) and
   a declaration's are not checked at boot: the decoder is the boot-time
   check. Contract-first mode does check `json` values against their schema.
-- No `.env` loading, no profiles (SPEC §4.4).
+- No `.env` loading, and no profiles or overlays in a declaration (SPEC
+  §4.4, §4.7).
+- Keystores are checked through their integrity MAC, not decrypted (see
+  [Files](#files)).
 
 ## Conformance
 
@@ -714,10 +819,30 @@ DOCUCONF_CONFORMANCE=../docuconf-go/conformance/cases.json DOCUCONF_REQUIRE_CONF
 DOCUCONF_CONFORMANCE=../docuconf-go/conformance/cases.json DOCUCONF_REQUIRE_CONFORMANCE=1 gleam test --target javascript
 ```
 
-Capability tags skipped: none, on either target. A skipped case fails the
+Every case runs in a new, empty directory: the runner writes the case's
+files there at their paths and loads with the case's `env` plus
+`DOCUCONF_FILE_ROOT` set to that directory as the whole environment.
+
+Capability tags skipped: none, on either target. The runner keeps an
+allow-list of the tags it supports (`int64`, `json-schema`, `key-set`,
+`deprecated`, `strict-parsing`, `files`, `profiles`, `overlays`); a case
+with any other tag is skipped, never run, and a skipped case fails the
 suite. `int64` runs on JavaScript through `BigIntValue`, and `json-schema`
 through contract-first mode's JSON Schema validator (see
 [Contract-first mode](#contract-first-mode)).
+
+**Export.** `test/export_fixture.gleam` declares the shared export fixture
+(docuconf-go's `conformance/export/fixture.yaml`), and the test exports it
+and runs `docuconf conformance export --golden
+../docuconf-go/conformance/export/golden.cue` on the result. It uses the
+CLI in `DOCUCONF_CLI` (else `docuconf` on `PATH`) and the golden contract
+under `DOCUCONF_GO_DIR` (else `../docuconf-go`), and is skipped when either
+is missing unless `DOCUCONF_REQUIRE_EXPORT=1` (as in CI). On Erlang the
+export matches exactly. On JavaScript it differs in one place, by design:
+`OLD_PORT`, an `int` with no bounds, exports `min` and `max` of ±(2^53 − 1),
+the integers that target holds (SPEC §5); the test expects exactly that
+difference. `test/golden/sample.cue` is kept as well, as a byte-for-byte
+golden of this SDK's own rendering.
 
 ## Development
 

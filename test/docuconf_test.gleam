@@ -4,6 +4,7 @@ import docuconf/duration
 import docuconf/internal/cue as cue_writer
 import docuconf/json
 import envoy
+import export_fixture
 import gleam/dict
 import gleam/int
 import gleam/list
@@ -227,6 +228,80 @@ pub fn export_options_test() {
   let assert True = string.contains(cue, "appVersion: \"1.2.3\"")
   let assert Error(docuconf.InvalidDeclaration(_)) =
     docuconf.contract(sample.spec(), name: "Not_A_Label")
+}
+
+/// The shared export fixture (SPEC §11.2 item 3): export_fixture.gleam
+/// declares docuconf-go's conformance/export/fixture.yaml, and
+/// `docuconf conformance export` compares its export with golden.cue as data.
+/// The docuconf CLI is DOCUCONF_CLI, else `docuconf` on PATH; the golden
+/// contract is under DOCUCONF_GO_DIR, else ../docuconf-go. Skipped when either
+/// is missing, unless DOCUCONF_REQUIRE_EXPORT=1.
+pub fn export_fixture_test() {
+  let assert Ok(cue) =
+    docuconf.contract_with(
+      export_fixture.spec(),
+      name: "docuconf-fixture",
+      package: None,
+      app_version: Some("1.0.0"),
+    )
+  cue_vet(cue)
+  let cli = case envoy.get("DOCUCONF_CLI") {
+    Ok(c) if c != "" -> c
+    _ -> "docuconf"
+  }
+  let golden = case envoy.get("DOCUCONF_GO_DIR") {
+    Ok(d) if d != "" -> d
+    _ -> "../docuconf-go"
+  }
+  let golden = golden <> "/conformance/export/golden.cue"
+  let ready =
+    support.has(cli) && support.shell("test -f '" <> golden <> "'").0 == 0
+  case ready, envoy.get("DOCUCONF_REQUIRE_EXPORT") {
+    False, Ok("1") ->
+      panic as {
+        "the docuconf CLI (" <> cli <> ") or " <> golden <> " is missing"
+      }
+    False, _ -> Nil
+    True, _ -> {
+      let dir = support.temp_dir()
+      let exported = dir <> "/exported.cue"
+      support.write(exported, cue)
+      let #(code, out) =
+        support.shell(
+          cli
+          <> " conformance export --golden '"
+          <> golden
+          <> "' '"
+          <> exported
+          <> "' 2>&1",
+        )
+      let _ = support.shell("rm -rf '" <> dir <> "'")
+      let differences =
+        string.split(out, "\n")
+        |> list.filter(fn(l) {
+          string.starts_with(l, "vars.")
+          || string.starts_with(l, "files.")
+          || string.starts_with(l, "metadata.")
+        })
+      // On JavaScript an int with no bounds of its own exports min and max
+      // within ±(2^53 − 1), the integers the target holds (SPEC §5), which
+      // the golden contract, written for 64-bit hosts, does not have.
+      let expected = case support.target() {
+        "javascript" -> [
+          "vars.OLD_PORT.max: not in the golden contract (exported 9007199254740991)",
+          "vars.OLD_PORT.min: not in the golden contract (exported -9007199254740991)",
+        ]
+        _ -> []
+      }
+      case code == 0 || list.sort(differences, string.compare) == expected {
+        True -> Nil
+        False ->
+          panic as {
+            "the export of the shared fixture differs from golden.cue:\n" <> out
+          }
+      }
+    }
+  }
 }
 
 /// cue vet -c against the meta-schema from docuconf-go (DOCUCONF_SPEC_CUE,

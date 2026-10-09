@@ -1,7 +1,7 @@
 //// The orders service's configuration, declared with docuconf. The same
 //// declaration loads the environment at boot and exports `contract.cue`.
 
-import docuconf.{type Secret}
+import docuconf.{type KeySet, type Secret}
 import docuconf/duration.{type Duration}
 import gleam/json.{type Json}
 import gleam/option.{type Option}
@@ -16,7 +16,7 @@ pub type Config {
     allowed_origins: List(String),
     request_timeout: Duration,
     worker_count: Int,
-    webhook_keys: Option(Secret(List(String))),
+    webhook_keys: Option(KeySet),
   )
 }
 
@@ -76,28 +76,19 @@ load balancer's idle timeout, or the client sees a reset rather than a
     |> docuconf.max_int(64)
     |> docuconf.default(4),
   )
-  // A key set (SPEC §6.1): a secret list of one or two keys, so a key can be
-  // rotated with an overlap in which both are valid.
+  // A key set (SPEC §4.3, §6.1): one or two secret keys, all valid at once,
+  // so a key can be rotated with an overlap in which both are valid. It is
+  // always secret; the generated docs print the rotation steps.
   use webhook_keys <- docuconf.env(
-    docuconf.string_list(
+    docuconf.key_set(
       "WEBHOOK_KEYS",
       "Keys that verify the signature on incoming payment webhooks",
-      separator: ",",
     )
     |> docuconf.details(
-      "A webhook is accepted when it is signed with any key in the list, so the key can be rotated without turning webhooks away. To rotate:
-
- 1. add the new key as the second item, and roll out;
- 2. switch the sender to the new key;
- 3. remove the old key, and roll out.
-
-Each key is 32 to 256 characters, so an empty or truncated key fails at boot. Without this variable, the service rejects every webhook.",
+      "A webhook is accepted when it is signed with any key in the set. Without this variable, the service rejects every webhook.",
     )
-    |> docuconf.min_items(1)
-    |> docuconf.max_items(2)
-    |> docuconf.item_min_length(32)
-    |> docuconf.item_max_length(256)
-    |> docuconf.secret
+    |> docuconf.key_min_length(32)
+    |> docuconf.key_max_length(256)
     |> docuconf.optional,
   )
   // Each `use` above bound a handle; `build` reads the values once they

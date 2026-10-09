@@ -3,7 +3,7 @@
 //// README appears, character for character, in this file or in the
 //// example app.
 
-import docuconf.{type Secret}
+import docuconf.{type KeySet, type Secret}
 import docuconf/contract_first
 import docuconf/duration
 import docuconf/json
@@ -105,4 +105,18 @@ pub fn contract_first_port(contract_json: String) -> Int {
   let assert Ok(values) = contract_first.load(contract_json, docuconf.options())
   let assert Ok(contract_first.IntValue(port)) = dict.get(values, "PORT")
   port
+}
+
+pub fn api_keys() -> docuconf.Spec(KeySet) {
+  use keys <- docuconf.env(
+    docuconf.key_set("API_KEYS", "Keys that callers present")
+    |> docuconf.key_min_length(32)
+    |> docuconf.key_max_length(256)
+    |> docuconf.required,
+  )
+  docuconf.build(keys)
+}
+
+pub fn authorized(keys: KeySet, presented: String) -> Bool {
+  docuconf.contains(keys, presented)
 }

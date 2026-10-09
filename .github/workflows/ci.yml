@@ -65,20 +65,33 @@ jobs:
       - name: Install cue
         run: go install cuelang.org/go/cmd/cue@v0.17.1
 
+      # The export test compares the shared fixture's export with
+      # docuconf-go's conformance/export/golden.cue through this CLI.
+      - name: Install the docuconf CLI
+        working-directory: docuconf-go/cmd/docuconf
+        run: |
+          go install .
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
       - run: gleam deps download
       - run: gleam format --check src test
       - run: gleam build --warnings-as-errors --target ${{ matrix.target }}
+      # The conformance runner fails when any case is skipped, and the export
+      # test when the fixture's export differs from golden.cue.
       - run: gleam test --target ${{ matrix.target }}
         env:
           DOCUCONF_SPEC_CUE: ${{ github.workspace }}/docuconf-go/spec/cue
           DOCUCONF_REQUIRE_VET: "1"
           DOCUCONF_CONFORMANCE: ${{ github.workspace }}/docuconf-go/conformance/cases.json
           DOCUCONF_REQUIRE_CONFORMANCE: "1"
+          DOCUCONF_GO_DIR: ${{ github.workspace }}/docuconf-go
+          DOCUCONF_REQUIRE_EXPORT: "1"
 
       - name: Run scripts/conformance.sh
         run: DOCUCONF_GO_DIR="$GITHUB_WORKSPACE/docuconf-go" scripts/conformance.sh
         env:
           GLEAM_TARGET: ${{ matrix.target }}
+          DOCUCONF_REQUIRE_EXPORT: "1"
 
   # examples/orders: build it against this SDK, check its committed
   # contract.cue is what the app exports, vet it, and smoke-test the service.

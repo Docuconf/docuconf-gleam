@@ -4,11 +4,19 @@
 //// cases.json is found through DOCUCONF_CONFORMANCE, else
 //// ../docuconf-go/conformance/cases.json. When it is missing the suite is
 //// skipped, unless DOCUCONF_REQUIRE_CONFORMANCE=1.
+////
+//// Each case runs in a new, empty directory: its files are written there at
+//// their paths, and the case's env plus DOCUCONF_FILE_ROOT=<dir> is the
+//// whole environment (no process environment, no termination log of the
+//// machine's). A case whose `requires` holds a tag this SDK does not list in
+//// `supported_tags` is skipped, never run, and a skipped case fails the
+//// suite.
 
 import docuconf
 import docuconf/contract_first
 import docuconf/json.{type Json}
 import envoy
+import gleam/bit_array
 import gleam/dict
 import gleam/int
 import gleam/io
@@ -18,11 +26,16 @@ import gleam/result
 import gleam/string
 import support
 
-/// Capability tags this SDK supports: all of them, on both targets. A
-/// skipped case fails the suite. On JavaScript an `int` beyond ±(2^53 − 1)
-/// is a `BigIntValue` holding its digits.
+/// The capability tags this SDK supports (an allow-list, SPEC §12): all of
+/// them, on both targets. A tag not listed here, such as one added to the
+/// suite after this runner was written, skips its cases rather than running
+/// them, and a skipped case fails the suite. On JavaScript an `int` beyond
+/// ±(2^53 − 1) is a `BigIntValue` holding its digits.
 fn supported_tags() -> List(String) {
-  ["int64", "json-schema"]
+  [
+    "int64", "json-schema", "key-set", "deprecated", "strict-parsing", "files",
+    "profiles", "overlays",
+  ]
 }
 
 /// Expected integers beyond ±(2^53 − 1), by "<case id> <var>", as their
@@ -163,23 +176,57 @@ fn run_case(
         _ -> []
       }
       let _ = support.shell("rm -f '" <> log <> "'")
-      let loaded = case contract_first.spec(contract) {
-        Error(e) -> Error(e)
-        Ok(spec) ->
-          docuconf.load_with(
-            spec,
-            docuconf.options()
-              |> docuconf.with_env(dict.from_list(env))
-              |> docuconf.with_termination_log(log),
-          )
-      }
-      case list.key_find(c, "expect"), list.key_find(c, "errors") {
+      let root = support.temp_dir()
+      write_files(c, root)
+      let _ = support.recall()
+      let loaded =
+        contract_first.load_json(
+          contract,
+          docuconf.options()
+            |> docuconf.with_env(
+              dict.from_list([#("DOCUCONF_FILE_ROOT", root), ..env]),
+            )
+            |> docuconf.with_termination_log(log)
+            |> docuconf.on_warning(support.remember),
+        )
+      let warnings = string.join(support.recall(), "\n")
+      let _ = support.shell("rm -rf '" <> root <> "'")
+      let secret_values = secrets(contract, env)
+      let outcome = case
+        list.key_find(c, "expect"),
+        list.key_find(c, "errors")
+      {
         Ok(json.Object(expect)), _ -> check_expect(loaded, expect, digits)
         _, Ok(json.Array(errors)) ->
-          check_errors(loaded, errors, secrets(contract, env), log)
+          check_errors(loaded, errors, secret_values, log)
         _, _ -> Failed("case has neither expect nor errors")
       }
+      case outcome, list.any(secret_values, string.contains(warnings, _)) {
+        Passed, True -> Failed("a secret value appears in a boot warning")
+        _, _ -> outcome
+      }
     }
+  }
+}
+
+/// Writes the case's files under root, at their paths: `{"text": ...}` as
+/// UTF-8, `{"base64": ...}` decoded.
+fn write_files(c: List(#(String, Json)), root: String) -> Nil {
+  case list.key_find(c, "files") {
+    Ok(json.Object(files)) ->
+      list.each(files, fn(f) {
+        let bytes = case f.1 {
+          json.String(text) | json.Object([#("text", json.String(text))]) ->
+            bit_array.from_string(text)
+          json.Object([#("base64", json.String(b64))]) -> {
+            let assert Ok(bytes) = bit_array.base64_decode(b64)
+            bytes
+          }
+          other -> panic as { "unknown file content " <> json.to_string(other) }
+        }
+        support.write_bytes(root <> f.0, bytes)
+      })
+    _ -> Nil
   }
 }
 

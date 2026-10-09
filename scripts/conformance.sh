@@ -11,8 +11,10 @@
 #
 # gleeunit runs every test module, so the project is copied to a temporary
 # directory with only the modules that matter here: conformance_test (the
-# shared suite) and docuconf_test (export_cue_vet_test and the golden export),
-# plus the modules and FFI files they use.
+# shared suite, which fails if any case is skipped) and docuconf_test
+# (export_cue_vet_test, the golden export and the shared export fixture,
+# which runs `docuconf conformance export` when the docuconf CLI is on PATH
+# or in DOCUCONF_CLI), plus the modules and FFI files they use.
 set -euo pipefail
 
 : "${DOCUCONF_GO_DIR:?set DOCUCONF_GO_DIR to a docuconf-go checkout}"
@@ -29,7 +31,7 @@ trap 'rm -rf "$work"' EXIT
 cp -r "$here/gleam.toml" "$here/src" "$work/"
 if [ -f "$here/manifest.toml" ]; then cp "$here/manifest.toml" "$work/"; fi
 mkdir "$work/test"
-for f in docuconf_gleam_test conformance_test docuconf_test support sample; do
+for f in docuconf_gleam_test conformance_test docuconf_test support sample export_fixture; do
   cp "$here/test/$f.gleam" "$work/test/"
 done
 cp -r "$here/test/golden" "$here"/test/*.erl "$here"/test/*.mjs "$work/test/"

@@ -1,5 +1,6 @@
 import { execSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 import { Ok, Error, toList } from "./gleam.mjs";
 
 export function shell(cmd) {
@@ -49,4 +50,13 @@ export function recall() {
   const l = toList(remembered);
   remembered = [];
   return l;
+}
+
+// Writes bytes to a file, creating its directory.
+export function write_bytes(path, bits) {
+  const bytes = Buffer.alloc(bits.byteSize);
+  for (let i = 0; i < bits.byteSize; i++) bytes[i] = bits.byteAt(i);
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, bytes);
+  return undefined;
 }
