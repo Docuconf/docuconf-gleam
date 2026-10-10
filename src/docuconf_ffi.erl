@@ -2,7 +2,8 @@
 -export([regex_compile/1, regex_matches/2, json_decode/1, read_file/1, file_info/1,
          write_file/2, file_exists/1, now_unix/0, print_error/1, pem_certificates/1, pem_count/1,
          tls_check/7, keystore_verify/3, int_limits/0, big_literal/1, exit/1, identity/1,
-         secure_equal/2, cell_new/1, cell_update/2, monotonic_ms/0, file_stamp/1]).
+         secure_equal/2, cell_new/1, cell_update/2, monotonic_ms/0, file_stamp/1,
+         now_unix_ms/0, start_ticker/2, rescue/1]).
 
 %% ---- regex (RE2 semantics are prepared on the Gleam side) -------------------
 
@@ -117,6 +118,34 @@ cell_update(Cell, F) ->
     end.
 
 monotonic_ms() -> erlang:monotonic_time(millisecond).
+
+now_unix_ms() -> erlang:system_time(millisecond).
+
+%% The background check of a watched input with on_change hooks.
+start_ticker(IntervalMs, F) ->
+    spawn(fun() -> ticker_loop(IntervalMs, F) end),
+    nil.
+
+ticker_loop(IntervalMs, F) ->
+    receive after IntervalMs -> ok end,
+    try F() catch _:_ -> ok end,
+    ticker_loop(IntervalMs, F).
+
+%% Runs an on_change hook. A failure is reported by kind only: a Gleam
+%% panic's gleam_error, or an Erlang error's atom, never values.
+rescue(F) ->
+    try F() of
+        _ -> {ok, nil}
+    catch
+        Class:Reason -> {error, error_kind(Class, Reason)}
+    end.
+
+error_kind(_, #{gleam_error := Kind}) when is_atom(Kind) -> atom_to_binary(Kind);
+error_kind(_, Reason) when is_atom(Reason) -> atom_to_binary(Reason);
+error_kind(_, Reason) when is_tuple(Reason), tuple_size(Reason) > 0,
+                           is_atom(element(1, Reason)) ->
+    atom_to_binary(element(1, Reason));
+error_kind(Class, _) -> atom_to_binary(Class).
 
 %% Follows symlinks (read_file_info does), so a swapped symlink is a change.
 file_stamp(Path) ->

@@ -77,6 +77,39 @@ export function monotonic_ms() {
   return Math.floor(performance.now());
 }
 
+export function now_unix_ms() {
+  return Date.now();
+}
+
+// The background check of a watched input with on_change hooks. The timer
+// does not keep the process alive.
+export function start_ticker(intervalMs, f) {
+  const timer = setInterval(() => {
+    try {
+      f();
+    } catch {
+      // A failed check is retried on the next tick.
+    }
+  }, intervalMs);
+  timer.unref?.();
+  return undefined;
+}
+
+// Runs an on_change hook. A failure is reported by kind only: a Gleam
+// panic's gleam_error, or the error's class name, never its message.
+export function rescue(f) {
+  try {
+    f();
+    return new Ok(undefined);
+  } catch (e) {
+    const kind =
+      (e && typeof e.gleam_error === "string" && e.gleam_error) ||
+      (e && e.constructor && e.constructor.name) ||
+      typeof e;
+    return new Error(kind);
+  }
+}
+
 // Follows symlinks (statSync does), so a swapped symlink is a change.
 export function file_stamp(path) {
   try {

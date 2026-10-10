@@ -550,8 +550,9 @@ pub fn authorized(keys: KeySet, presented: String) -> Bool {
 - It holds `min_keys` to `max_keys` keys (default 1 to 2); fewer is
   `too_few_items`, more `too_many_items`. A key outside `key_min_length`
   and `key_max_length`, and an empty key whatever the bounds (a trailing
-  comma), is `out_of_range`. The message gives the key's position and
-  length, never the key.
+  comma), is `out_of_range`. The message gives the key's position,
+  counted from 1 as received, and its length, never the key: `old,` is
+  `key 2 is empty`, `,new` is `key 1 is empty`.
 - It is always secret: it has no default and no examples, a `KeySet`
   prints as `KeySet(//fn() { ... })`, and no error or warning holds a key.
 - `keys(set)` gives the keys in order. `contains(set, candidate)` compares
@@ -668,7 +669,14 @@ symlink swap Kubernetes uses to update a mounted volume is seen. A changed
 file is checked as at boot; if it fails, the previous content stays and a
 warning naming the input and the problem goes to stderr. On Erlang the
 current content lives in a small process, so every process of the app sees
-the same one.
+the same one. See [Using a watched value](#using-a-watched-value) for
+`on_change` hooks and `reload_status`.
+
+A watched keystore is opened again with the password read at boot: a
+process's environment does not change, so a reload never reads it again.
+Rotating a keystore's password needs a rollout; a changed keystore that
+does not open with the boot password is rejected as `keystore_unreadable`
+and the previous one stays current.
 
 **Keystores** are opened with the password from `password_var` (an empty
 password when it is `None` or unset). Neither OTP nor Node.js reads PKCS#12
@@ -680,6 +688,73 @@ right and the file is intact; the keys are not decrypted. A wrong password
 or a corrupted file is `keystore_unreadable`, and so are PKCS#12 files with
 no MAC, PBMAC1 MACs (OpenSSL 3.4 `-pbmac1_pbkdf2`) and BER
 indefinite-length encodings, which are not supported.
+
+### Using a watched value
+
+An app that copies a watched value once, into a TLS listener, an HTTP
+client or a pool, keeps the old one until the certificate expires. Call
+`current` on every use, or rebuild what you made from the value in an
+`on_change` hook.
+
+`on_change(watched, fn(new) { ... })` registers a hook and returns a
+function that unregisters it. Hooks are called with the new content after
+a changed file passes its checks and replaces the old content, never for a
+rejected change, one after another in the order they were registered. A
+hook that panics or raises is reported on stderr by input name and error
+kind only (such as `panic`); the other hooks still run and the new content
+stays. While a hook is registered, a background check looks at the files
+once a second, so hooks run without the app reading the value: in a
+process of its own on Erlang, from a timer that does not keep the process
+alive on JavaScript. When `current` or `reload_status` sees the change
+first, the hooks run in the caller's process.
+
+```gleam
+// The listener was started with the certificate's paths, as mist's
+// `with_tls(certfile:, keyfile:)` does. OTP reads them through its PEM
+// cache; clearing it makes the next handshake read the renewed files.
+let _cancel =
+  docuconf.on_change(config.serving_tls, fn(_renewed) { clear_pem_cache() })
+```
+
+`clear_pem_cache` is `@external(erlang, "ssl", "clear_pem_cache")`. On
+Node.js, pass the new files to `server.setSecureContext` in the hook.
+
+```gleam
+// An HTTP client keeps the CA certificates it was built with: build it
+// again from the renewed bundle, and send later requests with that one.
+let _cancel =
+  docuconf.on_change(config.upstream_ca, fn(ca) {
+    replace_client(new_client(ca))
+  })
+```
+
+`reload_status(watched)` returns a `ReloadStatus` for a health check or a
+metric: `generation` (1 after boot, plus one per accepted reload),
+`last_reload` (when the last reload was accepted, in Unix milliseconds,
+`None` before the first) and `last_rejected` (the last rejected change as a
+`RejectedReload(time:, input:, codes:)`, never its content, cleared by the
+next accepted reload):
+
+```gleam
+let status = docuconf.reload_status(config.serving_tls)
+json.object([
+  #("generation", json.int(status.generation)),
+  #("last_reload_ms", case status.last_reload {
+    option.Some(at) -> json.int(at)
+    option.None -> json.null()
+  }),
+  #("last_rejected", case status.last_rejected {
+    option.Some(rejected) ->
+      json.array(rejected.codes, fn(c) {
+        json.string(docuconf.code_to_string(c))
+      })
+    option.None -> json.null()
+  }),
+])
+```
+
+A keystore reload uses the password read at boot (see `reload: watch`
+above): rotating a keystore's password needs a rollout.
 
 ## Loading
 
@@ -735,8 +810,9 @@ let assert Ok(contract_first.IntValue(port)) = dict.get(values, "PORT")
   file in JSON, YAML or TOML is a `JsonValue` of its data, checked against
   its `schema`; a `text` file is a `StringValue`; `tls`, `caBundle`,
   `keystore` (PKCS#12 and JKS) and `binary` inputs are `TlsValue`,
-  `CaBundleValue`, `KeystoreValue` and `BinaryValue`. `reload: watch` is a
-  declaration error here: contract-first mode reads each file once.
+  `CaBundleValue`, `KeystoreValue` and `BinaryValue`. `reload: watch` on a
+  file or an overlay is a declaration error here, naming the input:
+  contract-first mode reads each file once (SPEC §11.2 item 8 allows it).
 - `profiles` (SPEC §4.4): the selector's value, or `profiles.default` when
   it is unset, picks the profile, whose values stand in for the variables'
   defaults; a profile value satisfies a required variable.

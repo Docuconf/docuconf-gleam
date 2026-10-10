@@ -120,3 +120,65 @@ pub fn api_keys() -> docuconf.Spec(KeySet) {
 pub fn authorized(keys: KeySet, presented: String) -> Bool {
   docuconf.contains(keys, presented)
 }
+
+// ---- Using a watched value ------------------------------------------------------
+
+pub type Served {
+  Served(
+    serving_tls: docuconf.Watched(docuconf.Tls),
+    upstream_ca: docuconf.Watched(docuconf.CaBundle),
+  )
+}
+
+pub fn watch_certificates(config: Served) -> Nil {
+  // The listener was started with the certificate's paths, as mist's
+  // `with_tls(certfile:, keyfile:)` does. OTP reads them through its PEM
+  // cache; clearing it makes the next handshake read the renewed files.
+  let _cancel =
+    docuconf.on_change(config.serving_tls, fn(_renewed) { clear_pem_cache() })
+  // An HTTP client keeps the CA certificates it was built with: build it
+  // again from the renewed bundle, and send later requests with that one.
+  let _cancel =
+    docuconf.on_change(config.upstream_ca, fn(ca) {
+      replace_client(new_client(ca))
+    })
+  Nil
+}
+
+pub fn reload_health(config: Served) -> json.Json {
+  let status = docuconf.reload_status(config.serving_tls)
+  json.object([
+    #("generation", json.int(status.generation)),
+    #("last_reload_ms", case status.last_reload {
+      option.Some(at) -> json.int(at)
+      option.None -> json.null()
+    }),
+    #("last_rejected", case status.last_rejected {
+      option.Some(rejected) ->
+        json.array(rejected.codes, fn(c) {
+          json.string(docuconf.code_to_string(c))
+        })
+      option.None -> json.null()
+    }),
+  ])
+}
+
+// Erlang's ssl:clear_pem_cache/0 (its `ok` is ignored). Node.js has no PEM
+// cache: a server there takes the new files with server.setSecureContext.
+@external(erlang, "ssl", "clear_pem_cache")
+fn clear_pem_cache() -> Nil {
+  Nil
+}
+
+pub type HttpClient {
+  HttpClient(ca_file: String)
+}
+
+fn new_client(ca: docuconf.CaBundle) -> HttpClient {
+  HttpClient(ca_file: ca.path)
+}
+
+// Where the app keeps its client, such as an actor's state.
+fn replace_client(_client: HttpClient) -> Nil {
+  Nil
+}
