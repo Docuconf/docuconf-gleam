@@ -124,6 +124,34 @@ pub fn key_set_errors_test() {
   let assert Ok(None) = load(bare, [])
 }
 
+pub fn key_set_empty_key_message_test() {
+  let spec = one(docuconf.required(webhook_keys()))
+  let message = fn(value) {
+    let assert Error(docuconf.InvalidConfig([v])) =
+      load(spec, [#("WEBHOOK_KEYS", value)])
+    let assert "out_of_range" = docuconf.code_to_string(v.code)
+    v.message
+  }
+  // Keys are counted from 1, as received; the message holds no key.
+  let assert "key 2 is empty" = message(old_key <> ",")
+  let assert "key 1 is empty" = message("," <> new_key)
+  let bare =
+    one(
+      docuconf.key_set("KEYS", "Keys that callers present")
+      |> docuconf.max_keys(3)
+      |> docuconf.required,
+    )
+  let assert Error(docuconf.InvalidConfig([v])) =
+    load(bare, [#("KEYS", "a,,b")])
+  let assert "key 2 is empty" = v.message
+  let assert Error(e) = load(spec, [#("WEBHOOK_KEYS", old_key <> ",")])
+  let assert True =
+    string.contains(
+      docuconf.describe(e),
+      "  - WEBHOOK_KEYS [out_of_range]: key 2 is empty",
+    )
+}
+
 pub fn key_set_limits_replace_the_defaults_test() {
   let spec =
     one(
@@ -384,6 +412,199 @@ pub fn reload_watch_test() {
   let _ = support.shell("rm -rf '" <> root <> "'")
 }
 
+fn watched_motd(root: String, path: String) {
+  let spec = {
+    use motd <- docuconf.file(
+      docuconf.text("motd", "Message of the day", path:)
+      |> docuconf.text_max_length(10)
+      |> docuconf.reload_watch
+      |> docuconf.file_required,
+    )
+    use v <- docuconf.build
+    motd(v)
+  }
+  let assert Ok(motd) =
+    docuconf.load_with(
+      spec,
+      docuconf.options()
+        |> docuconf.with_env(dict.new())
+        |> docuconf.with_file_root(root),
+    )
+  motd
+}
+
+// A hook may run in the background check's process, so hooks record what
+// they see in a file.
+fn record(log: String, line: String) -> Nil {
+  let _ = support.sh("printf '%s\\n' '" <> line <> "' >> '" <> log <> "'")
+  Nil
+}
+
+fn recorded(log: String) -> List(String) {
+  case support.read_file(log) {
+    Ok(text) -> string.split(string.trim(text), "\n")
+    Error(Nil) -> []
+  }
+}
+
+pub fn reload_hooks_and_status_test() {
+  let root = support.temp_dir()
+  let path = "/etc/app/motd/motd.txt"
+  let log = root <> "/hooks.log"
+  support.write(root <> path, "hello")
+  let motd = watched_motd(root, path)
+  let assert docuconf.ReloadStatus(
+    generation: 1,
+    last_reload: None,
+    last_rejected: None,
+  ) = docuconf.reload_status(motd)
+  let cancel_a =
+    docuconf.on_change(motd, fn(v) { record(log, "a:" <> string.trim(v)) })
+  // A hook that panics is reported, and the other hooks still run.
+  let _ = docuconf.on_change(motd, fn(_) { panic as "hook failed" })
+  let _ =
+    docuconf.on_change(motd, fn(v) {
+      // A hook may read the value itself.
+      record(
+        log,
+        "c:" <> string.trim(docuconf.current(motd)) <> ":" <> string.trim(v),
+      )
+    })
+  // An accepted change runs every hook once, with the new content.
+  support.write(root <> path, "bonjour")
+  let _ = support.sh("sleep 1.2")
+  let assert "bonjour\n" = docuconf.current(motd)
+  let _ = support.sh("sleep 0.3")
+  let assert ["a:bonjour", "c:bonjour:bonjour"] = recorded(log)
+  let assert docuconf.ReloadStatus(
+    generation: 2,
+    last_reload: Some(at),
+    last_rejected: None,
+  ) = docuconf.reload_status(motd)
+  let assert True = at > 1_700_000_000_000
+  // A rejected change runs no hook, and is reported without its content.
+  support.write(root <> path, "a message far too long")
+  let _ = support.sh("sleep 1.2")
+  let assert "bonjour\n" = docuconf.current(motd)
+  let _ = support.sh("sleep 0.3")
+  let assert [_, _] = recorded(log)
+  let assert docuconf.ReloadStatus(
+    generation: 2,
+    last_reload: Some(at2),
+    last_rejected: Some(docuconf.RejectedReload(
+      time: rejected_at,
+      input: "motd",
+      codes: [docuconf.OutOfRange],
+    )),
+  ) = docuconf.reload_status(motd)
+  let assert True = at2 == at && rejected_at >= at
+  // An unregistered hook is not called; the next accepted change clears
+  // the rejection.
+  cancel_a()
+  support.write(root <> path, "salut")
+  let _ = support.sh("sleep 1.2")
+  let assert "salut\n" = docuconf.current(motd)
+  let _ = support.sh("sleep 0.3")
+  let assert [_, _, "c:salut:salut"] = recorded(log)
+  let assert docuconf.ReloadStatus(
+    generation: 3,
+    last_reload: Some(_),
+    last_rejected: None,
+  ) = docuconf.reload_status(motd)
+  let _ = support.shell("rm -rf '" <> root <> "'")
+}
+
+// With a hook registered, a change is found without the app reading the
+// value.
+pub fn reload_hooks_run_in_the_background_test() {
+  let root = support.temp_dir()
+  let path = "/etc/app/motd/motd.txt"
+  let log = root <> "/hooks.log"
+  support.write(root <> path, "hello")
+  let motd = watched_motd(root, path)
+  let _ = docuconf.on_change(motd, fn(v) { record(log, string.trim(v)) })
+  let _ = support.sh("sleep 1.1")
+  support.write(root <> path, "bonjour")
+  support.after(2500, fn() {
+    let assert ["bonjour"] = recorded(log)
+    let _ = support.shell("rm -rf '" <> root <> "'")
+    Nil
+  })
+}
+
+// A reload opens a changed keystore with the password read at boot: one
+// exported with another password is keystore_unreadable, and the previous
+// keystore stays current.
+pub fn reload_keystore_keeps_the_boot_password_test() {
+  let root = support.temp_dir()
+  let dir = root <> "/ks"
+  let p12 = fn(password) {
+    let _ =
+      support.sh(
+        "cd '"
+        <> dir
+        <> "' && openssl pkcs12 -export -in c.pem -inkey k.pem -out store.p12 -passout 'pass:"
+        <> password
+        <> "' 2>&1",
+      )
+    Nil
+  }
+  let _ =
+    support.sh(
+      "mkdir -p '"
+      <> dir
+      <> "' && cd '"
+      <> dir
+      <> "' && openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout k.pem -out c.pem -days 2 -subj /CN=ks 2>&1",
+    )
+  p12("changeit")
+  let spec = {
+    use ks <- docuconf.file(
+      docuconf.keystore(
+        "store",
+        "Partner keystore",
+        path: "/ks/store.p12",
+        format: docuconf.Pkcs12,
+        password_var: Some("STORE_PASSWORD"),
+      )
+      |> docuconf.reload_watch
+      |> docuconf.file_required,
+    )
+    use _ <- docuconf.env(
+      docuconf.string("STORE_PASSWORD", "Password for the keystore")
+      |> docuconf.secret
+      |> docuconf.required,
+    )
+    docuconf.build(ks)
+  }
+  let assert Ok(ks) =
+    docuconf.load_with(
+      spec,
+      docuconf.options()
+        |> docuconf.with_env(dict.from_list([#("STORE_PASSWORD", "changeit")]))
+        |> docuconf.with_file_root(root),
+    )
+  let _ = support.sh("sleep 1.1")
+  p12("rotated-password")
+  let _ = support.sh("sleep 1.1")
+  let assert True = string.ends_with(docuconf.current(ks), "/ks/store.p12")
+  let assert docuconf.ReloadStatus(
+    generation: 1,
+    last_reload: None,
+    last_rejected: Some(docuconf.RejectedReload(
+      input: "store",
+      codes: [docuconf.KeystoreUnreadable],
+      ..,
+    )),
+  ) = docuconf.reload_status(ks)
+  // Exported again with the boot password, it is accepted.
+  p12("changeit")
+  let _ = support.sh("sleep 1.1")
+  let assert docuconf.ReloadStatus(generation: 2, last_rejected: None, ..) =
+    docuconf.reload_status(ks)
+  let _ = support.shell("rm -rf '" <> root <> "'")
+}
+
 // ---- contract-first -------------------------------------------------------------
 
 fn contract(fields: String) -> json.Json {
@@ -412,6 +633,7 @@ pub fn contract_first_watch_is_rejected_test() {
     )
   let assert Error(docuconf.InvalidDeclaration([p])) = cf_load(c, [])
   let assert True = string.contains(p, "reload: watch is not supported")
+  let assert True = string.contains(p, "motd")
 }
 
 pub fn contract_first_overlay_secret_and_env_test() {
