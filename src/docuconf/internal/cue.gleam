@@ -12,7 +12,7 @@ import gleam/string
 pub const sdk_name = "docuconf"
 
 // x-release-please-start-version
-pub const sdk_version = "0.1.0"
+pub const sdk_version = "0.2.0"
 
 // x-release-please-end
 
