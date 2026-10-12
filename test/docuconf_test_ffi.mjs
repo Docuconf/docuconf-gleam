@@ -60,3 +60,17 @@ export function write_bytes(path, bits) {
   writeFileSync(path, bytes);
   return undefined;
 }
+
+// Runs f after ms milliseconds, letting timers run meanwhile; gleeunit
+// awaits the promise a test returns.
+export function after(ms, f) {
+  return new Promise((resolve, reject) =>
+    setTimeout(() => {
+      try {
+        resolve(f());
+      } catch (e) {
+        reject(e);
+      }
+    }, ms),
+  );
+}

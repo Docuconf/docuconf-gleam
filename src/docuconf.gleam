@@ -992,7 +992,9 @@ pub fn key_set(name: String, description: String) -> VarBuilder(KeySet) {
 /// keys unless `min_keys` and `max_keys` say otherwise; fewer is
 /// `too_few_items`, more `too_many_items`. A key outside `key_min_length`
 /// and `key_max_length`, and an empty key whatever the bounds (a stray
-/// separator), is `out_of_range`. Keys are never trimmed.
+/// separator), is `out_of_range`; the message names the key by its
+/// position, counted from 1 as received (`old,` is `key 2 is empty`).
+/// Keys are never trimmed.
 ///
 /// Finish it with `required` or `optional`:
 ///
@@ -1173,8 +1175,7 @@ fn key_limits(
           let #(len, i) = pair
           let what = "key " <> int.to_string(i) <> " is "
           case len, kmin, kmax {
-            0, _, _ ->
-              Error(#(OutOfRange, what <> "empty (a stray separator?)"))
+            0, _, _ -> Error(#(OutOfRange, what <> "empty"))
             _, Some(m), _ if len < m ->
               Error(#(
                 OutOfRange,
@@ -2519,7 +2520,8 @@ pub fn map_file(input: File(a), with f: fn(a) -> b) -> File(b) {
 // ---- reload: watch ----------------------------------------------------------------
 
 /// The value of a file input declared with `reload_watch`. Read the file's
-/// current content with `current`.
+/// current content with `current`, run code when it changes with
+/// `on_change`, and report on its reloads with `reload_status`.
 pub opaque type Watched(a) {
   Watched(cell: Cell(WatchState(a)))
 }
@@ -2532,10 +2534,44 @@ type WatchState(a) {
     next_check: Int,
     reload: fn() -> Result(#(a, List(String)), List(Problem)),
     name: String,
+    generation: Int,
+    last_reload: Option(Int),
+    last_rejected: Option(RejectedReload),
+    hooks: List(#(Int, fn(a) -> Nil)),
+    next_hook: Int,
+    // True only on the state returned by the update that accepted a change,
+    // so the caller that made that update, and no other, runs the hooks.
+    accepted: Bool,
   )
 }
 
-/// How often, at most, `current` looks at the files of a watched input.
+/// Where a watched input stands, for a health check or a metric. See
+/// `reload_status`.
+pub type ReloadStatus {
+  ReloadStatus(
+    /// 1 after boot, plus one per accepted reload.
+    generation: Int,
+    /// When the last reload was accepted, in Unix milliseconds; `None`
+    /// before the first one.
+    last_reload: Option(Int),
+    /// The last rejected change, cleared when a later change is accepted.
+    last_rejected: Option(RejectedReload),
+  )
+}
+
+/// A changed file that failed its checks and was not used. It names the
+/// input and the violation codes, never the content.
+pub type RejectedReload {
+  RejectedReload(
+    /// When the change was rejected, in Unix milliseconds.
+    time: Int,
+    /// The file input's name.
+    input: String,
+    codes: List(Code),
+  )
+}
+
+/// How often, at most, the files of a watched input are looked at.
 const watch_interval_ms = 1000
 
 /// The app rereads the file when it changes, exported as `reload: watch`
@@ -2553,12 +2589,16 @@ const watch_interval_ms = 1000
 /// let table = docuconf.current(config.routes)
 /// ```
 ///
-/// `current` checks the file's size, modification time and inode (for a
-/// `tls` input, those of `tls.crt`, `tls.key` and `ca.crt`) at most once a
-/// second, following symlinks, so the symlink swap Kubernetes uses to update
-/// a mounted volume counts as a change. A changed file is checked exactly as
-/// at boot; when it fails (or is gone), the previous content stays current
-/// and a warning naming the input and the problem is printed to stderr.
+/// The files' size, modification time and inode (for a `tls` input, those
+/// of `tls.crt`, `tls.key` and `ca.crt`) are looked at at most once a
+/// second, following symlinks, so the symlink swap Kubernetes uses to
+/// update a mounted volume counts as a change. They are looked at when the
+/// app calls `current` or `reload_status`, and, while an `on_change` hook
+/// is registered, by a background check once a second. A changed file is
+/// checked exactly as at boot, with the boot environment (so a keystore is
+/// opened with the password read at boot). When it fails (or is gone), the
+/// previous content stays current and a warning naming the input and the
+/// problem is printed to stderr.
 ///
 /// Call it before `secret_file`, `file_required` or `file_optional`.
 pub fn reload_watch(b: FileBuilder(a)) -> FileBuilder(Watched(a)) {
@@ -2575,6 +2615,10 @@ pub fn reload_watch(b: FileBuilder(a)) -> FileBuilder(Watched(a)) {
         Loaded(v) -> {
           let reload = fn() {
             let now = stamps()
+            // The environment is the one read at boot, as a process's does
+            // not change; the clock is read again unless `at_time` fixed it.
+            let ctx =
+              Context(..ctx, now: option.lazy_unwrap(ctx.clock, now_unix))
             case check_file(b, path, ctx) {
               Loaded(v) -> Ok(#(v, now))
               Failed(ps) -> Error(ps)
@@ -2590,6 +2634,12 @@ pub fn reload_watch(b: FileBuilder(a)) -> FileBuilder(Watched(a)) {
                 next_check: monotonic_ms() + watch_interval_ms,
                 reload:,
                 name: b.meta.name,
+                generation: 1,
+                last_reload: None,
+                last_rejected: None,
+                hooks: [],
+                next_hook: 0,
+                accepted: False,
               )),
             ),
           )
@@ -2601,11 +2651,117 @@ pub fn reload_watch(b: FileBuilder(a)) -> FileBuilder(Watched(a)) {
 
 /// The current content of a watched file input: rereads the file when it
 /// changed since the last look (at most once a second). See `reload_watch`.
+///
+/// Read it on every use rather than once at startup: a TLS context, an HTTP
+/// client or a pool built once from it keeps the old content. To rebuild
+/// such a thing when the file changes, use `on_change`.
 pub fn current(watched: Watched(a)) -> a {
-  cell_update(watched.cell, refresh).value
+  check(watched).value
+}
+
+/// Calls `hook` with the new content each time a changed file passes its
+/// checks and replaces the previous content, never for a change that is
+/// rejected. Returns a function that unregisters the hook.
+///
+/// While a hook is registered, a background check looks at the files once
+/// a second, so hooks run without the app reading the value: in a process
+/// of its own on Erlang, from a timer on JavaScript (one that does not keep
+/// the process alive). A change that `current` or `reload_status` finds
+/// first runs the hooks in the caller's process. Hooks run one after
+/// another, in the order they were registered. A hook that panics or
+/// raises is reported on stderr by input name and error kind only, and the
+/// other hooks still run; the new content stays current either way.
+///
+/// ```gleam
+/// let cancel =
+///   docuconf.on_change(config.upstream_ca, fn(ca) {
+///     process.send(client, RebuildWith(ca))
+///   })
+/// ```
+pub fn on_change(watched: Watched(a), hook: fn(a) -> Nil) -> fn() -> Nil {
+  let state =
+    cell_update(watched.cell, fn(s) {
+      WatchState(
+        ..s,
+        hooks: list.append(s.hooks, [#(s.next_hook, hook)]),
+        next_hook: s.next_hook + 1,
+        accepted: False,
+      )
+    })
+  let id = state.next_hook - 1
+  // The first hook ever registered starts the background check.
+  case id {
+    0 ->
+      start_ticker(watch_interval_ms, fn() {
+        let state =
+          cell_update(watched.cell, fn(s) {
+            case s.hooks {
+              [] -> WatchState(..s, accepted: False)
+              _ -> refresh(s)
+            }
+          })
+        notify(state)
+      })
+    _ -> Nil
+  }
+  fn() {
+    let _ =
+      cell_update(watched.cell, fn(s) {
+        WatchState(
+          ..s,
+          hooks: list.filter(s.hooks, fn(h) { h.0 != id }),
+          accepted: False,
+        )
+      })
+    Nil
+  }
+}
+
+/// The input's generation, its last accepted reload and its last rejected
+/// change, after looking at the files as `current` does. Nothing in it
+/// holds content, so it can be served by a health check:
+///
+/// ```gleam
+/// let status = docuconf.reload_status(config.serving_tls)
+/// // status.generation, status.last_reload, status.last_rejected
+/// ```
+pub fn reload_status(watched: Watched(a)) -> ReloadStatus {
+  let state = check(watched)
+  ReloadStatus(
+    generation: state.generation,
+    last_reload: state.last_reload,
+    last_rejected: state.last_rejected,
+  )
+}
+
+fn check(watched: Watched(a)) -> WatchState(a) {
+  let state = cell_update(watched.cell, refresh)
+  notify(state)
+  state
+}
+
+// Runs the hooks outside the cell, so a hook may read the value itself.
+fn notify(state: WatchState(a)) -> Nil {
+  case state.accepted {
+    False -> Nil
+    True ->
+      list.each(state.hooks, fn(h) {
+        case rescue(fn() { h.1(state.value) }) {
+          Ok(Nil) -> Nil
+          Error(kind) ->
+            print_error(
+              "docuconf: warning: an on_change hook of file input "
+              <> state.name
+              <> " failed: "
+              <> kind,
+            )
+        }
+      })
+  }
 }
 
 fn refresh(state: WatchState(a)) -> WatchState(a) {
+  let state = WatchState(..state, accepted: False)
   let now = monotonic_ms()
   case now < state.next_check {
     True -> state
@@ -2616,7 +2772,16 @@ fn refresh(state: WatchState(a)) -> WatchState(a) {
         True -> state
         False ->
           case state.reload() {
-            Ok(#(value, stamps)) -> WatchState(..state, value:, stamps:)
+            Ok(#(value, stamps)) ->
+              WatchState(
+                ..state,
+                value:,
+                stamps:,
+                generation: state.generation + 1,
+                last_reload: Some(now_unix_ms()),
+                last_rejected: None,
+                accepted: True,
+              )
             Error(problems) -> {
               list.each(problems, fn(p) {
                 print_error(
@@ -2628,8 +2793,14 @@ fn refresh(state: WatchState(a)) -> WatchState(a) {
                   <> p.1,
                 )
               })
+              let rejected =
+                RejectedReload(
+                  time: now_unix_ms(),
+                  input: state.name,
+                  codes: list.unique(list.map(problems, fn(p) { p.0 })),
+                )
               // Not tried again until the files change again.
-              WatchState(..state, stamps:)
+              WatchState(..state, stamps:, last_rejected: Some(rejected))
             }
           }
       }
@@ -2659,6 +2830,22 @@ fn cell_update(cell: Cell(a), f: fn(a) -> a) -> a
 @external(erlang, "docuconf_ffi", "monotonic_ms")
 @external(javascript, "./docuconf_ffi.mjs", "monotonic_ms")
 fn monotonic_ms() -> Int
+
+@external(erlang, "docuconf_ffi", "now_unix_ms")
+@external(javascript, "./docuconf_ffi.mjs", "now_unix_ms")
+fn now_unix_ms() -> Int
+
+// Calls f every interval_ms, for as long as the program runs; an error in
+// f is ignored. On JavaScript the timer does not keep the process alive.
+@external(erlang, "docuconf_ffi", "start_ticker")
+@external(javascript, "./docuconf_ffi.mjs", "start_ticker")
+fn start_ticker(interval_ms: Int, f: fn() -> Nil) -> Nil
+
+// Runs f; when it panics or raises, returns the kind of error (such as
+// "panic" or "badarith"), never its message or values.
+@external(erlang, "docuconf_ffi", "rescue")
+@external(javascript, "./docuconf_ffi.mjs", "rescue")
+fn rescue(f: fn() -> Nil) -> Result(Nil, String)
 
 // Size, modification time and inode, following symlinks; "absent" when the
 // file cannot be read.
@@ -2811,6 +2998,8 @@ type Context {
     env: Dict(String, String),
     file_root: Option(String),
     now: Int,
+    /// The time `at_time` fixed, if any; a reload reads the clock otherwise.
+    clock: Option(Int),
     /// Every declared variable name and path_env, for typo hints.
     declared: List(String),
     layers: Dict(String, Layer),
@@ -3253,6 +3442,7 @@ pub fn load_with(spec: Spec(a), options: Options) -> Result(a, Error) {
           env:,
           file_root: file_root(options, env),
           now: option.lazy_unwrap(options.now, now_unix),
+          clock: options.now,
           declared:,
           layers: options.layers,
         )
@@ -3345,7 +3535,7 @@ fn boot_warnings(
         FileInput(f) ->
           case f.deprecated {
             Some(msg) -> {
-              let ctx = Context(env, root, 0, [], dict.new())
+              let ctx = Context(env, root, 0, None, [], dict.new())
               case file_info(resolve_path(f, ctx)) {
                 Ok(_) -> [deprecation_warning(f.name, msg, f.replaced_by)]
                 Error(_) -> []

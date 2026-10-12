@@ -1,6 +1,6 @@
 -module(docuconf_test_ffi).
 -export([shell/1, target/0, read_file/1, remember/1, recall/0, big_expects/1,
-         write_bytes/2]).
+         write_bytes/2, run_after/2]).
 
 target() -> <<"erlang">>.
 
@@ -46,3 +46,8 @@ write_bytes(Path, Bin) ->
     ok = filelib:ensure_dir(Path),
     ok = file:write_file(Path, Bin),
     nil.
+
+%% Runs F after Ms milliseconds; other processes run meanwhile.
+run_after(Ms, F) ->
+    timer:sleep(Ms),
+    F().

@@ -91,7 +91,7 @@ the sender, and the problem never prints a key:
 ```
 $ DATABASE_URL=postgres://orders:secret@localhost:5432/orders WEBHOOK_KEYS=old-webhook-key-0123456789abcdef0123, gleam run
 docuconf: 1 configuration problem:
-  - WEBHOOK_KEYS [out_of_range]: key 2 is empty (a stray separator?)
+  - WEBHOOK_KEYS [out_of_range]: key 2 is empty
 ```
 
 The generated docs print these steps for every key set, so the declaration's

@@ -32,6 +32,15 @@ pub fn remember(s: String) -> Nil
 @external(javascript, "./docuconf_test_ffi.mjs", "recall")
 pub fn recall() -> List(String)
 
+/// What `after` returns: on JavaScript a promise, which gleeunit awaits.
+pub type Later
+
+/// Runs `f` after `ms` milliseconds, while timers and other processes run.
+/// A test that returns it lets a background check do its work.
+@external(erlang, "docuconf_test_ffi", "run_after")
+@external(javascript, "./docuconf_test_ffi.mjs", "after")
+pub fn after(ms: Int, f: fn() -> Nil) -> Later
+
 /// Runs a command that must succeed; returns its output.
 pub fn sh(cmd: String) -> String {
   let #(code, out) = shell(cmd)
