@@ -17,12 +17,12 @@ jobs:
     runs-on: ubuntu-24.04
     environment: hex
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Pick the docuconf-go ref
         id: dcref
         run: echo "ref=$(tr -d '[:space:]' < .github/docuconf-go.ref)" >> "$GITHUB_OUTPUT"
       - name: Check out docuconf-go
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: docuconf/docuconf-go
           ref: ${{ steps.dcref.outputs.ref }}
@@ -32,10 +32,10 @@ jobs:
           otp-version: "27"
           gleam-version: "1.18.1"
           rebar3-version: "3"
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: stable
           cache: false
@@ -78,8 +78,8 @@ jobs:
       contents: write # create the GitHub Release and upload its assets
       packages: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
+      - uses: actions/checkout@v5
         with:
           repository: docuconf/docuconf-go
           path: docuconf-go
@@ -88,10 +88,10 @@ jobs:
           otp-version: "27"
           gleam-version: "1.18.1"
           rebar3-version: "3"
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: stable
           cache: false
