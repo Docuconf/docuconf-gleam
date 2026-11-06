@@ -35,7 +35,7 @@ jobs:
     env:
       HAS_APP: ${{ secrets.RELEASE_APP_ID != '' && secrets.RELEASE_APP_PRIVATE_KEY != '' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: main
 
@@ -71,7 +71,7 @@ jobs:
       - name: Create a GitHub App token
         id: app-token
         if: steps.target.outputs.changed == 'true' && env.HAS_APP == 'true'
-        uses: actions/create-github-app-token@v1
+        uses: actions/create-github-app-token@v3
         with:
           app-id: ${{ secrets.RELEASE_APP_ID }}
           private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
@@ -79,7 +79,7 @@ jobs:
       - name: Open or update the bump pull request
         id: cpr
         if: steps.target.outputs.changed == 'true'
-        uses: peter-evans/create-pull-request@v7
+        uses: peter-evans/create-pull-request@v8
         with:
           token: ${{ steps.app-token.outputs.token || github.token }}
           branch: docuconf-go-bump

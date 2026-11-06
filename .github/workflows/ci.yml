@@ -25,7 +25,7 @@ jobs:
       matrix:
         target: [erlang, javascript]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Pick the docuconf-go ref
         id: dcref
@@ -41,7 +41,7 @@ jobs:
       # (conformance/cases.json) live in docuconf-go; the export test vets
       # generated contracts against the first, the runner reads the second.
       - name: Check out docuconf-go
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: docuconf/docuconf-go
           ref: ${{ steps.dcref.outputs.ref }}
@@ -53,11 +53,11 @@ jobs:
           gleam-version: "1.18.1"
           rebar3-version: "3"
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: stable
           cache: false
@@ -101,7 +101,7 @@ jobs:
       run:
         working-directory: examples/orders
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Pick the docuconf-go ref
         id: dcref
@@ -114,7 +114,7 @@ jobs:
           elif [ -n "$OVERRIDE" ]; then echo "ref=$OVERRIDE" >> "$GITHUB_OUTPUT"
           else echo "ref=$(tr -d '[:space:]' < .github/docuconf-go.ref)" >> "$GITHUB_OUTPUT"; fi
       - name: Check out docuconf-go
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: docuconf/docuconf-go
           ref: ${{ steps.dcref.outputs.ref }}
@@ -126,7 +126,7 @@ jobs:
           gleam-version: "1.18.1"
           rebar3-version: "3"
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: stable
           cache: false
