@@ -31,6 +31,19 @@
 ////   config-file overlay, then the environment. Layering needs the
 ////   environment, so it applies through `load` and `load_json`; `spec`
 ////   returns the declaration without it.
+//// - `requiredIf` on variables and files (SPEC §4.2.1): the input is
+////   required while the condition variable's loaded value (environment,
+////   overlay, profile or default) is the condition's value. A missing
+////   variable is then `missing_required`, `is required when TLS_ENABLED is
+////   true`, and a missing file `file_missing`, its message ending with
+////   `, and is required when TLS_ENABLED is true`.
+//// - `roles` (SPEC §4.9): `DOCUCONF_ROLE` names the workload's role, and an
+////   input whose `roles` do not include it is optional. Without a valid
+////   role every input with `roles` is optional, so the role is the one
+////   problem reported.
+//// - `includes` (SPEC §4.8): read and checked, and returned by `includes`.
+////   The fragments' variables are inline in `vars`, so they load like any
+////   other.
 ////
 //// An `int` holds the full 64-bit range on both targets: an `IntValue`, or
 //// on JavaScript, beyond ±(2^53 − 1) where an `Int` is not exact, a
@@ -166,12 +179,37 @@ pub fn load_json(
     None -> c.vars
     Some(p) -> with_profile(c.vars, p, selected(p, c.vars, env))
   }
+  let #(layers, violations) = overlay_layers(c, root)
+  // Roles (SPEC §4.9): an input only other roles use is optional here.
+  let role = selected_role(c, env)
+  let vars = list.map(vars, narrow(_, role))
+  let files = list.map(c.files, narrow(_, role))
+  // Conditional requirements (SPEC §4.2.1), on the condition variables'
+  // loaded values.
+  let value_of = condition_value(vars, _, options, env, layers)
+  let vars = list.map(vars, activate(_, role, value_of))
+  let files = list.map(files, activate(_, role, value_of))
   use spec <- result.try(
-    build_spec(Contract(..c, vars:))
+    build_spec(Contract(..c, vars:, files:))
     |> result.map_error(docuconf.InvalidDeclaration),
   )
-  let #(layers, violations) = overlay_layers(c, root)
   docuconf.load_with(spec, docuconf.with_layers(options, layers, violations))
+}
+
+/// The well-known fragments a contract includes (SPEC §4.8), as
+/// `name@major`, such as `["go-runtime@1", "otel@1"]`; empty when it has
+/// none. Their variables are inline in `vars` and load like any other.
+pub fn includes(contract: Json) -> Result(List(String), docuconf.Error) {
+  read_contract(contract)
+  |> result.map(fn(c) { c.includes })
+  |> result.map_error(docuconf.InvalidDeclaration)
+}
+
+/// The roles a contract declares (SPEC §4.9); empty when it has none.
+pub fn roles(contract: Json) -> Result(List(String), docuconf.Error) {
+  read_contract(contract)
+  |> result.map(fn(c) { option.unwrap(c.roles, []) })
+  |> result.map_error(docuconf.InvalidDeclaration)
 }
 
 /// The declaration a contract describes, for `docuconf.load_with`,
@@ -208,8 +246,18 @@ type Contract {
     files: List(#(String, Def)),
     profiles: Option(Profiles),
     overlays: List(Overlay),
+    roles: Option(List(String)),
+    includes: List(String),
   )
 }
+
+/// The variable that names the workload's role (SPEC §4.9).
+const role_var = "DOCUCONF_ROLE"
+
+/// Set on an input a `requiredIf` condition makes required at this boot, to
+/// the condition as its message writes it (`TLS_ENABLED is true`). Never
+/// read from a contract: `read_contract` drops it.
+const when_key = "requiredWhen"
 
 fn read_contract(contract: Json) -> Result(Contract, List(String)) {
   use fields <- result.try(case contract {
@@ -222,7 +270,8 @@ fn read_contract(contract: Json) -> Result(Contract, List(String)) {
       Ok(json.Object(entries)) ->
         list.try_map(entries, fn(e) {
           case e.1 {
-            json.Object(def) -> Ok(#(e.0, def))
+            json.Object(def) ->
+              Ok(#(e.0, list.filter(def, fn(f) { f.0 != when_key })))
             _ -> Error([what <> " " <> e.0 <> ": must be an object"])
           }
         })
@@ -239,10 +288,420 @@ fn read_contract(contract: Json) -> Result(Contract, List(String)) {
     Error(Nil) | Ok(json.Null) -> #([], [])
     Ok(o) -> read_overlays(o)
   }
-  let c = Contract(vars:, files:, profiles:, overlays:)
-  case list.append(profile_problems, overlay_problems) {
+  let #(includes, include_problems) =
+    read_includes(list.key_find(fields, "includes"))
+  let #(roles, role_problems) = case list.key_find(fields, "roles") {
+    Error(Nil) | Ok(json.Null) -> #(None, [])
+    Ok(r) -> read_roles(r)
+  }
+  let inputs =
+    list.append(
+      list.map(vars, fn(v) { #("variable " <> v.0, v) }),
+      list.map(files, fn(f) { #("file " <> f.0, f) }),
+    )
+  let input_problems =
+    list.flat_map(inputs, fn(i) {
+      let #(what, #(name, def)) = i
+      list.flatten([
+        input_role_problems(def, roles)
+          |> list.map(fn(p) { what <> ": " <> p }),
+        condition_problems(name, def, vars)
+          |> list.map(fn(p) { what <> ": " <> p }),
+      ])
+    })
+  let c = Contract(vars:, files:, profiles:, overlays:, roles:, includes:)
+  case
+    list.flatten([
+      profile_problems,
+      overlay_problems,
+      include_problems,
+      role_problems,
+      input_problems,
+      role_var_problems(roles, vars),
+    ])
+  {
     [] -> Ok(c)
     problems -> Error(problems)
+  }
+}
+
+// ---- includes, roles and requiredIf ---------------------------------------------
+
+// `includes` (SPEC §4.8): a list of fragment names, name@major, none twice.
+fn read_includes(found: Result(Json, Nil)) -> #(List(String), List(String)) {
+  let malformed = "includes must be a list of fragment names, such as otel@1"
+  case found {
+    Error(Nil) | Ok(json.Null) -> #([], [])
+    Ok(json.Array(items)) ->
+      case list.try_map(items, string_of) {
+        Error(_) -> #([], [malformed])
+        Ok(names) -> {
+          let #(names, problems) =
+            list.fold(names, #([], []), fn(acc, name) {
+              case fragment_name(name), list.contains(acc.0, name) {
+                False, _ -> #(acc.0, [
+                  "includes: "
+                    <> json.quote(name)
+                    <> " is not a fragment name, name@major",
+                  ..acc.1
+                ])
+                True, True -> #(acc.0, [
+                  "includes: " <> name <> " is listed twice",
+                  ..acc.1
+                ])
+                True, False -> #([name, ..acc.0], acc.1)
+              }
+            })
+          #(list.reverse(names), list.reverse(problems))
+        }
+      }
+    Ok(_) -> #([], [malformed])
+  }
+}
+
+// name@major: a lowercase name, then a major version from 1, with no
+// leading zero.
+fn fragment_name(name: String) -> Bool {
+  let lower = "abcdefghijklmnopqrstuvwxyz"
+  let digits = "0123456789"
+  case string.split_once(name, "@") {
+    Ok(#(base, major)) ->
+      case string.to_graphemes(base), string.to_graphemes(major) {
+        [first, ..rest], [lead, ..more] ->
+          string.contains(lower, first)
+          && list.all(rest, string.contains(lower <> digits <> "-", _))
+          && string.contains("123456789", lead)
+          && list.all(more, string.contains(digits, _))
+        _, _ -> False
+      }
+    Error(Nil) -> False
+  }
+}
+
+// A list of roles (SPEC §4.9): DNS labels, at least one, none listed twice.
+fn read_roles(node: Json) -> #(Option(List(String)), List(String)) {
+  let names = case node {
+    json.Array([_, ..] as items) -> list.try_map(items, string_of)
+    _ -> Error("")
+  }
+  case names {
+    Error(_) -> #(None, ["roles must be a list of at least one role name"])
+    Ok(names) -> {
+      let problems =
+        list.index_map(names, fn(r, i) {
+          case role_name(r), list.contains(list.take(names, i), r) {
+            False, _ -> ["role " <> json.quote(r) <> " must be a DNS label"]
+            True, True -> ["role " <> r <> " is listed twice"]
+            True, False -> []
+          }
+        })
+      #(Some(names), list.flatten(problems))
+    }
+  }
+}
+
+// A DNS label: at most 63 lowercase letters, digits and hyphens, starting
+// and ending with a letter or digit.
+fn role_name(name: String) -> Bool {
+  let chars = "abcdefghijklmnopqrstuvwxyz0123456789"
+  let n = string.length(name)
+  n >= 1
+  && n <= 63
+  && list.all(string.to_graphemes(name), string.contains(chars <> "-", _))
+  && !string.starts_with(name, "-")
+  && !string.ends_with(name, "-")
+}
+
+// An input's roles: readable, and each one of the contract's.
+fn input_role_problems(def: Def, roles: Option(List(String))) -> List(String) {
+  case list.key_find(def, "roles") {
+    Error(Nil) | Ok(json.Null) -> []
+    Ok(node) ->
+      case read_roles(node), roles {
+        #(_, [_, ..] as problems), _ -> problems
+        #(_, []), None -> ["has roles, but the contract declares none"]
+        #(used, []), Some(roles) ->
+          option.unwrap(used, [])
+          |> list.filter(fn(r) { !list.contains(roles, r) })
+          |> list.map(fn(r) {
+            "role "
+            <> r
+            <> " is not one of the contract's roles, "
+            <> string.join(roles, ", ")
+          })
+      }
+  }
+}
+
+// With roles, DOCUCONF_ROLE is a required enum whose values are the roles,
+// used by every role.
+fn role_var_problems(
+  roles: Option(List(String)),
+  vars: List(#(String, Def)),
+) -> List(String) {
+  case roles {
+    None -> []
+    Some(roles) -> {
+      let ok = case list.key_find(vars, role_var) {
+        Ok(def) ->
+          list.key_find(def, "type") == Ok(json.String("enum"))
+          && list.key_find(def, "required") == Ok(json.Bool(True))
+          && absent(def, "roles")
+          && list.key_find(def, "values")
+          == Ok(json.Array(list.map(roles, json.String)))
+        Error(Nil) -> False
+      }
+      when(
+        !ok,
+        "variable "
+          <> role_var
+          <> ": a contract with roles declares it as a required enum whose values are the roles, "
+          <> string.join(roles, ", ")
+          <> ", used by every role",
+      )
+    }
+  }
+}
+
+fn absent(def: Def, key: String) -> Bool {
+  case list.key_find(def, key) {
+    Error(Nil) | Ok(json.Null) -> True
+    Ok(_) -> False
+  }
+}
+
+// `requiredIf: {VAR: value}` (SPEC §4.2.1): one other declared variable, a
+// plain string, int, bool or enum one, and a value it can hold, on an input
+// that is not required, has no default and is not deprecated.
+fn condition_problems(
+  name: String,
+  def: Def,
+  vars: List(#(String, Def)),
+) -> List(String) {
+  case list.key_find(def, "requiredIf") {
+    Error(Nil) | Ok(json.Null) -> []
+    Ok(json.Object([#(on, want)])) ->
+      case env_var_name(on), want {
+        True, json.String(_) | True, json.Int(_) | True, json.Bool(_) ->
+          list.flatten([
+            when(
+              list.key_find(def, "required") == Ok(json.Bool(True))
+                || !absent(def, "default"),
+              "an input with requiredIf cannot be required or have a default",
+            ),
+            when(
+              !absent(def, "deprecated"),
+              "a conditionally required input cannot be deprecated: the platform could not stop setting it",
+            ),
+            condition_target(name, on, want, vars),
+          ])
+        _, _ -> [
+          "requiredIf must name one variable and a string, integer or boolean value",
+        ]
+      }
+    Ok(_) -> ["requiredIf must name one variable and its value: {VAR: value}"]
+  }
+}
+
+fn condition_target(
+  name: String,
+  on: String,
+  want: Json,
+  vars: List(#(String, Def)),
+) -> List(String) {
+  case list.key_find(vars, on) {
+    Ok(on_def) if on != name -> {
+      let type_ = case list.key_find(on_def, "type") {
+        Ok(json.String(t)) -> t
+        _ -> ""
+      }
+      let plain =
+        list.key_find(on_def, "secret") != Ok(json.Bool(True))
+        && list.contains(["string", "int", "bool", "enum"], type_)
+      // A bool is never an int, nor an int a bool.
+      let same_type = case type_, want {
+        "int", json.Int(_) -> True
+        "bool", json.Bool(_) -> True
+        "string", json.String(_) | "enum", json.String(_) -> True
+        _, _ -> False
+      }
+      let cannot = fn(detail) {
+        [
+          "requiredIf: "
+          <> condition_text(on, want)
+          <> " is not a value "
+          <> on
+          <> " can have"
+          <> detail,
+        ]
+      }
+      case plain, same_type {
+        False, _ -> [
+          "requiredIf names "
+          <> on
+          <> ", which is not a plain string, int, bool or enum variable",
+        ]
+        True, False -> cannot("")
+        True, True ->
+          case value_problems(on, on_def, want) {
+            [] -> []
+            [p, ..] -> cannot(": " <> p)
+          }
+      }
+    }
+    _ -> [
+      "requiredIf must name another declared variable, not " <> json.quote(on),
+    ]
+  }
+}
+
+// What the variable's constraints say about the value, as they would about
+// its default.
+fn value_problems(name: String, def: Def, value: Json) -> List(String) {
+  case declare(name, with_default(def, value)) {
+    Error(p) -> [p]
+    Ok(var) ->
+      docuconf.check_declaration({
+        use _ <- docuconf.env(var)
+        docuconf.succeed(Nil)
+      })
+      |> list.filter_map(fn(p) {
+        // "variable NAME: default does not satisfy ..."
+        case string.split_once(p, ": ") {
+          Ok(#(_, rest)) ->
+            case string.starts_with(rest, "default") {
+              True -> Ok(rest)
+              False -> Error(Nil)
+            }
+          Error(Nil) -> Error(Nil)
+        }
+      })
+  }
+}
+
+// The condition as messages write it: the value as JSON, so a string is
+// quoted (`LOG_FORMAT is "json"`).
+fn condition_text(on: String, want: Json) -> String {
+  on <> " is " <> json.to_string(want)
+}
+
+fn env_var_name(name: String) -> Bool {
+  let upper = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+  case string.to_graphemes(name) {
+    [first, ..rest] ->
+      string.contains(upper, first)
+      && list.all(rest, string.contains(upper <> "0123456789_", _))
+    [] -> False
+  }
+}
+
+// ---- roles and conditions at load -------------------------------------------------
+
+// The workload's role: DOCUCONF_ROLE when it is one of the contract's roles.
+fn selected_role(c: Contract, env: Dict(String, String)) -> Option(String) {
+  case c.roles, dict.get(env, role_var) {
+    Some(roles), Ok(r) ->
+      case list.contains(roles, r) {
+        True -> Some(r)
+        False -> None
+      }
+    _, _ -> None
+  }
+}
+
+// Whether the workload's role uses the input: every role uses an input
+// without roles, and with no role only those inputs are used.
+fn in_role(def: Def, role: Option(String)) -> Bool {
+  case list.key_find(def, "roles"), role {
+    Ok(json.Array(used)), Some(r) -> list.contains(used, json.String(r))
+    Ok(json.Array(_)), None -> False
+    _, _ -> True
+  }
+}
+
+// An input another role uses is optional in this one.
+fn narrow(input: #(String, Def), role: Option(String)) -> #(String, Def) {
+  case in_role(input.1, role) {
+    True -> input
+    False -> #(
+      input.0,
+      list.map(input.1, fn(f) {
+        case f.0 {
+          "required" -> #("required", json.Bool(False))
+          _ -> f
+        }
+      }),
+    )
+  }
+}
+
+// An input whose condition holds, in a role that uses it, is required, and
+// its message says why.
+fn activate(
+  input: #(String, Def),
+  role: Option(String),
+  value_of: fn(String) -> Option(Value),
+) -> #(String, Def) {
+  let #(name, def) = input
+  case list.key_find(def, "requiredIf") {
+    Ok(json.Object([#(on, want)])) ->
+      case in_role(def, role) && holds(value_of(on), want) {
+        True -> #(
+          name,
+          def
+            |> list.filter(fn(f) { f.0 != "required" })
+            |> list.append([
+              #("required", json.Bool(True)),
+              #(when_key, json.String(condition_text(on, want))),
+            ]),
+        )
+        False -> input
+      }
+    _ -> input
+  }
+}
+
+// Whether a loaded value is the condition's value (a bool is never an int).
+fn holds(value: Option(Value), want: Json) -> Bool {
+  case value, want {
+    Some(BoolValue(b)), json.Bool(w) -> b == w
+    Some(IntValue(_) as v), json.Int(w)
+    | Some(BigIntValue(_) as v), json.Int(w)
+    -> int_text(v) == Ok(int.to_string(w))
+    Some(StringValue(s)), json.String(w) -> s == w
+    _, _ -> False
+  }
+}
+
+// A condition variable's loaded value: the environment, an overlay, the
+// selected profile or its default, as the load itself reads it. A variable
+// with a violation of its own has no value, and makes nothing required.
+fn condition_value(
+  vars: List(#(String, Def)),
+  name: String,
+  options: docuconf.Options,
+  env: Dict(String, String),
+  layers: Dict(String, Layer),
+) -> Option(Value) {
+  case list.key_find(vars, name) {
+    Error(Nil) -> None
+    Ok(def) ->
+      case declare(name, def) {
+        Error(_) -> None
+        Ok(var) -> {
+          // Quietly: the load itself reports and warns.
+          let quiet =
+            options
+            |> docuconf.with_env(env)
+            |> docuconf.without_termination_log
+            |> docuconf.on_warning(fn(_) { Nil })
+            |> docuconf.with_layers(layers, [])
+          case docuconf.load_with(build([#(name, var)], [], []), quiet) {
+            Ok(values) -> option.from_result(dict.get(values, name))
+            Error(_) -> None
+          }
+        }
+      }
   }
 }
 
@@ -1035,7 +1494,7 @@ fn finish_file(
     True, True ->
       Ok(
         docuconf.secret_file(b)
-        |> docuconf.file_required
+        |> require_file(def)
         |> docuconf.map_file(fn(s) { SecretValue(docuconf.map_secret(s, wrap)) }),
       )
     True, False ->
@@ -1049,7 +1508,7 @@ fn finish_file(
           }
         }),
       )
-    False, True -> Ok(docuconf.file_required(b) |> docuconf.map_file(wrap))
+    False, True -> Ok(require_file(b, def) |> docuconf.map_file(wrap))
     False, False ->
       Ok(
         docuconf.file_optional(b)
@@ -1060,6 +1519,15 @@ fn finish_file(
           }
         }),
       )
+  }
+}
+
+// A required file, its message naming the requiredIf condition that makes
+// it required, if any.
+fn require_file(b: docuconf.FileBuilder(a), def: Def) -> docuconf.File(a) {
+  case list.key_find(def, when_key) {
+    Ok(json.String(condition)) -> docuconf.file_required_when(b, condition)
+    _ -> docuconf.file_required(b)
   }
 }
 
@@ -1211,7 +1679,12 @@ fn finish_var(
 ) -> Result(Var(Value), String) {
   use required <- result.try(flag(def, "required"))
   case required, list.key_find(def, "default") {
-    True, _ -> Ok(docuconf.required(b) |> docuconf.map(wrap))
+    True, _ ->
+      case list.key_find(def, when_key) {
+        Ok(json.String(condition)) ->
+          Ok(docuconf.required_when(b, condition) |> docuconf.map(wrap))
+        _ -> Ok(docuconf.required(b) |> docuconf.map(wrap))
+      }
     False, Ok(j) -> {
       use value <- result.try(
         default_of(j) |> result.map_error(fn(e) { "default " <> e }),
