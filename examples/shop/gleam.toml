@@ -1,0 +1,11 @@
+name = "shop"
+version = "0.1.0"
+description = "The docuconf shop example: roles, requiredIf and an included fragment, loaded contract-first."
+
+[dependencies]
+# The SDK in this repository, not a published version.
+docuconf_gleam = { path = "../.." }
+gleam_stdlib = ">= 1.0.0 and < 2.0.0"
+
+[dev_dependencies]
+gleeunit = ">= 1.0.0 and < 2.0.0"

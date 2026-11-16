@@ -12,6 +12,10 @@
 #   git clone --depth 1 --branch v1.2.0 https://github.com/lpil/envoy $VENDOR/envoy
 #   git clone --depth 1 --branch v1.11.0 https://github.com/lpil/gleeunit $VENDOR/gleeunit
 #
+# It then checks examples/shop, which needs nothing more: build, test,
+# regenerate contract.cue from contract.json and compare (with cue), and
+# smoke.sh.
+#
 # When VENDOR also holds wisp and mist with their dependencies (wisp's
 # manifest.toml lists them), the script then checks examples/orders as CI
 # does: build, test, re-export contract.cue and compare, cue vet, and
@@ -24,7 +28,7 @@ work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 cp -r "$here/src" "$here/test" "$here/gleam.toml" "$here/README.md" "$work/"
 [ -d "$here/examples" ] && cp -r "$here/examples" "$work/"
-rm -rf "$work/examples/orders/build" "$work/examples/orders/manifest.toml"
+rm -rf "$work"/examples/*/build "$work"/examples/*/manifest.toml
 
 # Copy the checkouts, so their gleam.toml files can be rewritten.
 mkdir "$work/vendor"
@@ -78,6 +82,21 @@ if [ -d "$work/vendor/wisp" ] && [ -d "$work/examples/orders" ]; then
     (cd "$vet" && cue vet -c ./orders)
     echo "orders: cue vet -c ok"
   fi
+  ./smoke.sh
+fi
+
+# examples/shop needs only the SDK's own dependencies, so it is always
+# checked, on the target given (smoke.sh reads SHOP_TARGET).
+if [ -d "$work/examples/shop" ]; then
+  cd "$work/examples/shop"
+  gleam format --check src test
+  gleam build --warnings-as-errors "$@"
+  gleam test "$@"
+  if command -v "${CUE:-cue}" >/dev/null; then
+    ./contract-cue.sh
+    diff -u "$here/examples/shop/contract.cue" contract.cue
+  fi
+  case " $* " in *" javascript "* | *--target=javascript*) export SHOP_TARGET=javascript ;; esac
   ./smoke.sh
 fi
 exit $status

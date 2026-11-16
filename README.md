@@ -24,6 +24,14 @@ Its only dependencies are `gleam_stdlib` and `envoy`. The package is
 The steps below follow [`examples/orders`](examples/orders), a small wisp
 service. Every Gleam snippet in this README is compiled in CI.
 
+Examples:
+
+- [`examples/orders`](examples/orders): a small wisp service with a Gleam
+  declaration, its exported contract, generated docs and a key set rotation.
+- [`examples/shop`](examples/shop): a web and a worker role, `requiredIf`
+  and the `otel@1` fragment, loaded from a hand-written `contract.json` in
+  [contract-first mode](#contract-first-mode), with the shared test matrix.
+
 ## 1. Install
 
 docuconf is not on Hex yet. Depend on it from git, in `gleam.toml`:
@@ -965,6 +973,8 @@ Where Hex is unreachable, `scripts/offline-test.sh` runs the tests against
 source checkouts of the dependencies (see the script). With wisp, mist and
 their dependencies checked out too, it also builds and tests
 `examples/orders`, compares its exported contract and runs its `smoke.sh`.
+It always checks `examples/shop`, which needs nothing more, on the target
+given.
 
 ## Licence
 

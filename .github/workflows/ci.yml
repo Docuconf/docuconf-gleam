@@ -174,3 +174,91 @@ jobs:
 
       - name: Smoke test
         run: ./smoke.sh
+
+  # examples/shop: roles, requiredIf and the otel@1 fragment, loaded
+  # contract-first from its committed contract.json, on both targets. Its
+  # tests run the README's matrix; smoke.sh runs the app for three cases.
+  example-shop:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [erlang, javascript]
+    defaults:
+      run:
+        working-directory: examples/shop
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Pick the docuconf-go ref
+        id: dcref
+        working-directory: .
+        env:
+          EVENT: ${{ github.event_name }}
+          OVERRIDE: ${{ inputs.docuconf_go_ref }}
+        run: |
+          if [ "$EVENT" = schedule ]; then echo "ref=main" >> "$GITHUB_OUTPUT"
+          elif [ -n "$OVERRIDE" ]; then echo "ref=$OVERRIDE" >> "$GITHUB_OUTPUT"
+          else echo "ref=$(tr -d '[:space:]' < .github/docuconf-go.ref)" >> "$GITHUB_OUTPUT"; fi
+      - name: Check out docuconf-go
+        uses: actions/checkout@v4
+        with:
+          repository: docuconf/docuconf-go
+          ref: ${{ steps.dcref.outputs.ref }}
+          path: docuconf-go
+
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: "27"
+          gleam-version: "1.18.1"
+          rebar3-version: "3"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: false
+
+      - name: Install cue
+        run: go install cuelang.org/go/cmd/cue@v0.17.1
+
+      - run: gleam deps download
+      - run: gleam format --check src test
+      - run: gleam build --warnings-as-errors --target ${{ matrix.target }}
+      - run: gleam test --target ${{ matrix.target }}
+
+      # contract.json is the source; contract.cue is the same contract in
+      # CUE, written by contract-cue.sh, for cue vet and docuconf docs.
+      - name: contract.cue is up to date
+        run: |
+          ./contract-cue.sh
+          git diff --exit-code -- contract.cue
+
+      - name: Vet the contract against the meta-schema
+        run: |
+          vet=$(mktemp -d)
+          cp -r "$GITHUB_WORKSPACE/docuconf-go/spec/cue/cue.mod" "$GITHUB_WORKSPACE/docuconf-go/spec/cue/contract" "$vet/"
+          mkdir "$vet/shop"
+          cp contract.cue "$vet/shop/"
+          cd "$vet" && cue vet -c ./shop
+
+      - name: Install the docuconf CLI
+        working-directory: docuconf-go/cmd/docuconf
+        run: |
+          go install .
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      # These are the README's commands.
+      - name: Generated docs are up to date
+        run: |
+          docuconf docs contract.cue --check CONFIG.md
+          docuconf docs contract.cue --format agents --check CONFIG.agents.md
+          docuconf docs contract.cue --format model --check docs.json
+
+      - name: Smoke test
+        run: ./smoke.sh
+        env:
+          SHOP_TARGET: ${{ matrix.target }}
