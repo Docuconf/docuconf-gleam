@@ -824,6 +824,26 @@ let assert Ok(contract_first.IntValue(port)) = dict.get(values, "PORT")
   does not parse or is not an object is `file_malformed` for the overlay; a
   value of the wrong shape is `invalid_type` for the variable, and a secret
   is never taken from an overlay.
+- `requiredIf` on a variable or a file input (SPEC §4.2.1): the input is
+  required while the condition variable's loaded value (environment,
+  overlay, profile or default) equals the condition's value. A missing
+  variable is then `missing_required`, `is required when TLS_ENABLED is
+  true` (the value as JSON, so `LOG_FORMAT is "json"`), and a missing file
+  `file_missing`, its message ending with `, and is required when
+  TLS_ENABLED is true`. A condition variable with a violation of its own
+  makes nothing required. The condition must name another declared,
+  non-secret `string`, `int`, `bool` or `enum` variable and a value it can
+  hold (a bool is never an int), on an input that is not required, has no
+  default and is not deprecated; anything else is a declaration error.
+- `roles` (SPEC §4.9): `DOCUCONF_ROLE`, a required `enum` of exactly the
+  roles, names the workload's role, and an input whose `roles` do not
+  include it is optional. With no role, or one the contract does not
+  declare, every input with `roles` is optional, so the role is the one
+  problem reported. Roles are DNS labels, and an input's roles must be
+  among the contract's. `contract_first.roles(json)` returns them.
+- `includes` (SPEC §4.8): the fragments' variables are inline in `vars` and
+  load like any other; `contract_first.includes(json)` returns the list
+  (`name@major`, none twice).
 
 Layering needs the environment, so `contract_first.spec(json)`, which
 returns the declaration for `load_with` or `contract`, leaves profiles and
@@ -876,6 +896,8 @@ Compared with the specification and the Elixir SDK:
   check. Contract-first mode does check `json` values against their schema.
 - No `.env` loading, and no profiles or overlays in a declaration (SPEC
   §4.4, §4.7).
+- No `requiredIf`, `roles` or `includes` in a declaration (SPEC §4.2.1,
+  §4.9, §4.8); contract-first mode reads all three.
 - Keystores are checked through their integrity MAC, not decrypted (see
   [Files](#files)).
 
@@ -901,9 +923,12 @@ files there at their paths and loads with the case's `env` plus
 
 Capability tags skipped: none, on either target. The runner keeps an
 allow-list of the tags it supports (`int64`, `json-schema`, `key-set`,
-`deprecated`, `strict-parsing`, `files`, `profiles`, `overlays`); a case
-with any other tag is skipped, never run, and a skipped case fails the
-suite. `int64` runs on JavaScript through `BigIntValue`, and `json-schema`
+`deprecated`, `strict-parsing`, `files`, `profiles`, `overlays`,
+`required-if`, `roles`); a case with any other tag is skipped, never run,
+and a skipped case fails the suite. The pending cases, `cases.pending.json`
+next to `cases.json` (or at `DOCUCONF_CONFORMANCE_PENDING`), run too: a case
+with a supported tag must pass, one with another tag is skipped without
+failing, and the run is skipped when the file is missing. `int64` runs on JavaScript through `BigIntValue`, and `json-schema`
 through contract-first mode's JSON Schema validator (see
 [Contract-first mode](#contract-first-mode)).
 

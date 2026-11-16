@@ -1699,6 +1699,19 @@ pub fn required(b: VarBuilder(a)) -> Var(a) {
   })
 }
 
+/// `required`, for a variable a `requiredIf` condition makes required at
+/// this boot (SPEC §4.2.1), as contract-first mode reads it: the message
+/// names the condition, `is required when TLS_ENABLED is true`.
+@internal
+pub fn required_when(b: VarBuilder(a), condition: String) -> Var(a) {
+  Var(meta: VarMeta(..b.meta, required: True), read: fn(raw) {
+    case raw {
+      None -> Error(#(MissingRequired, "is required when " <> condition))
+      Some(s) -> parse_and_check(b, s)
+    }
+  })
+}
+
 /// The variable may be unset; it is then `None`.
 pub fn optional(b: VarBuilder(a)) -> Var(Option(a)) {
   Var(meta: b.meta, read: fn(raw) {
@@ -2858,6 +2871,26 @@ pub fn file_required(b: FileBuilder(a)) -> File(a) {
   File(meta: FileMeta(..b.meta, required: True), load: fn(path, ctx) {
     case check_file(b, path, ctx) {
       Missing -> Error([#(FileMissing, path <> " not found")])
+      Failed(ps) -> Error(ps)
+      Loaded(v) -> Ok(v)
+    }
+  })
+}
+
+/// `file_required`, for a file input a `requiredIf` condition makes required
+/// at this boot (SPEC §4.2.1), as contract-first mode reads it: a missing
+/// file's message ends with `, and is required when TLS_ENABLED is true`.
+@internal
+pub fn file_required_when(b: FileBuilder(a), condition: String) -> File(a) {
+  File(meta: FileMeta(..b.meta, required: True), load: fn(path, ctx) {
+    case check_file(b, path, ctx) {
+      Missing ->
+        Error([
+          #(
+            FileMissing,
+            path <> " not found, and is required when " <> condition,
+          ),
+        ])
       Failed(ps) -> Error(ps)
       Loaded(v) -> Ok(v)
     }

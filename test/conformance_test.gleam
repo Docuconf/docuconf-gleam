@@ -11,6 +11,13 @@
 //// machine's). A case whose `requires` holds a tag this SDK does not list in
 //// `supported_tags` is skipped, never run, and a skipped case fails the
 //// suite.
+////
+//// cases.pending.json, next to cases.json (or at
+//// DOCUCONF_CONFORMANCE_PENDING), holds the cases of features the suite
+//// adds before every SDK has them. It runs the same way, except that a
+//// case with a tag this SDK does not support is skipped without failing;
+//// every case it does run must pass. It is skipped when the file is
+//// missing.
 
 import docuconf
 import docuconf/contract_first
@@ -34,7 +41,7 @@ import support
 fn supported_tags() -> List(String) {
   [
     "int64", "json-schema", "key-set", "deprecated", "strict-parsing", "files",
-    "profiles", "overlays",
+    "profiles", "overlays", "required-if", "roles",
   ]
 }
 
@@ -50,22 +57,46 @@ type Outcome {
   Failed(reason: String)
 }
 
-pub fn conformance_test() {
-  let path = case envoy.get("DOCUCONF_CONFORMANCE") {
+fn cases_path() -> String {
+  case envoy.get("DOCUCONF_CONFORMANCE") {
     Ok(p) if p != "" -> p
     _ -> "../docuconf-go/conformance/cases.json"
   }
+}
+
+pub fn conformance_test() {
+  let path = cases_path()
   case support.read_file(path) {
     Error(Nil) ->
       case envoy.get("DOCUCONF_REQUIRE_CONFORMANCE") {
         Ok("1") -> panic as { "conformance cases not found at " <> path }
         _ -> io.println("\nconformance: skipped, " <> path <> " not found")
       }
-    Ok(text) -> run(text)
+    Ok(text) -> run(text, "conformance", False)
   }
 }
 
-fn run(text: String) -> Nil {
+/// The pending cases: unknown tags skip without failing, and the run is
+/// skipped when the file is missing.
+pub fn pending_conformance_test() {
+  let path = case envoy.get("DOCUCONF_CONFORMANCE_PENDING") {
+    Ok(p) if p != "" -> p
+    _ -> {
+      let cases = cases_path()
+      case string.ends_with(cases, "cases.json") {
+        True -> string.drop_end(cases, 10) <> "cases.pending.json"
+        False -> cases <> ".pending"
+      }
+    }
+  }
+  case support.read_file(path) {
+    Error(Nil) ->
+      io.println("\nconformance pending: skipped, " <> path <> " not found")
+    Ok(text) -> run(text, "conformance pending", True)
+  }
+}
+
+fn run(text: String, label: String, may_skip: Bool) -> Nil {
   let assert Ok(json.Object(top)) = json.parse(text)
   let assert Ok(json.Array(cases)) = list.key_find(top, "cases")
   let log = support.temp_dir() <> "/termination-log"
@@ -105,7 +136,9 @@ fn run(text: String) -> Nil {
       <> ")"
   }
   io.println(
-    "\nconformance ("
+    "\n"
+    <> label
+    <> " ("
     <> support.target()
     <> "): "
     <> int.to_string(passed)
@@ -119,6 +152,7 @@ fn run(text: String) -> Nil {
   )
   case failed, skipped {
     [], [] -> Nil
+    [], _ if may_skip -> Nil
     [], _ ->
       panic as {
         int.to_string(list.length(skipped))
