@@ -1,5 +1,5 @@
 name = "docuconf_gleam"
-version = "0.1.0"
+version = "0.2.0"
 description = "Typed configuration contracts for Gleam apps: declare env vars and files, validate them at boot and export a CUE contract."
 licences = ["MIT"]
 repository = { type = "github", user = "docuconf", repo = "docuconf-gleam" }
